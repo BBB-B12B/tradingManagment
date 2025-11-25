@@ -1,0 +1,33 @@
+name: cdc-zone-ci
+
+on:
+  push:
+    branches: ["main", "001-cdc-zone-bot"]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Poetry
+        run: pip install poetry
+      - name: Install signal_engine deps
+        run: |
+          cd services/signal_engine
+          poetry install
+      - name: Install orchestrator deps
+        run: |
+          cd services/orchestrator
+          poetry install
+      - name: Run unit tests
+        run: |
+          cd services/signal_engine && poetry run pytest
+          cd ../../services/orchestrator && poetry run pytest
+      - name: Cloudflare Wrangler check
+        run: |
+          npm install -g wrangler
+          cd services/cloudflare_api && wrangler deploy --dry-run

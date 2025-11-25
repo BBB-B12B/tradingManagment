@@ -1,0 +1,14 @@
+- alert: KillSwitchTriggered
+  expr: cdc_kill_switch == 1
+  for: 1m
+  labels:
+    severity: critical
+  annotations:
+    summary: "CDC Kill switch activated"
+- alert: DailyBreakerClose
+  expr: cdc_daily_loss_pct > 0.025
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Daily loss approaching breaker"

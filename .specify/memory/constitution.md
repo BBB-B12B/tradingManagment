@@ -1,50 +1,85 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+รายงานผลกระทบการซิงก์
+- เวอร์ชัน: 1.0.0 → 1.0.1
+- หลักการที่แก้ไข:
+  - เปลี่ยนข้อความทั้งหมดเป็นภาษาไทย (ชื่อคงเดิม I–V)
+- ส่วนที่เพิ่ม: ไม่มี (ปรับถ้อยคำเป็นภาษาไทย)
+- ส่วนที่ลบ: ไม่มี
+- เทมเพลตที่อัปเดต:
+  - ✅ .specify/templates/plan-template.md
+  - ✅ .specify/templates/spec-template.md
+  - ✅ .specify/templates/tasks-template.md
+- งานค้าง: ไม่มี
+-->
 
-## Core Principles
+# รัฐธรรมนูญระบบ Trading Tool
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+## หลักการแกน
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### I. การรักษาทุนมาก่อน
+กลยุทธ์อัตโนมัติทุกตัวต้องกำหนดค่าความเสี่ยงก่อนพัฒนา: ความเสี่ยงต่อ
+การเทรดหนึ่งครั้งต้องไม่เกิน 1% ของทุนที่จัดสรร, ต้องมีวงจรกันขาดทุนรายวัน
+และขีดจำกัด Drawdown แบบ rolling ที่หยุดระบบเมื่อถูกละเมิด การส่งคำสั่งสดต้อง
+ปฏิเสธดีลที่ไม่ผ่านรั้วความปลอดภัยเหล่านี้ และรีวิวโค้ดต้องยืนยันว่า logic
+ของ Stop-loss ถูกปิดไม่ได้ เหตุผล: ตลาดคริปโตผันผวนสูงจนบัญชีหมดก่อนระบบจะ
+ตรวจพบได้ จึงต้องเอาการอยู่รอดมาก่อนกำไร
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### II. กอง Indicator แบบกำหนดซ้ำได้
+Indicator, data feed และสัญญาณต้องถูกเวอร์ชันและสร้างซ้ำได้พร้อมข้อมูลเวลา
+Pipeline ย้อนหลังกับเวลาจริงต้องใช้โค้ดและขั้นตอนเดียวกันทั้งหมด Config ใดๆ
+ต้องเก็บในโค้ดและมี hash ตรวจสอบ แหล่งข้อมูลบุคคลที่สามต้องมี snapshot ของ
+schema พร้อม SLA ความหน่วง และไฟล์แคชทุกตัวต้องระบุแหล่งที่มา ความละเอียด
+และ Timezone เหตุผล: ความต่างเพียงเล็กน้อยในสูตร Indicator มีผลต่อดีลอัตโนมัติ
+จึงต้องการความกำหนดซ้ำเพื่อให้การวิจัยตรงกับโปรดักชัน
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### III. ปล่อยใช้งานผ่าน Research Gate
+ห้ามกลยุทธ์เข้าสู่ตลาดจริงจนกว่าจะผ่าน: (1) สมมติฐานที่เขียนชัดเจน
+(2) Backtest อย่างน้อย 3 ช่วงตลาด (3) Paper/Paper-trade อย่างน้อย 2 สัปดาห์หรือ
+100 เทรด (ยึดตามตัวที่นานกว่า) และ (4) มีการลงชื่ออนุมัติจากฝ่ายความเสี่ยงในแผน
+Pipeline การ Build ต้องตรวจทุกเงื่อนไขก่อนเปิดให้ Deploy เหตุผล: Indicator
+อาจ Overfit ได้ง่าย การปล่อยแบบมีด่านตรวจทำให้ไม่ส่งของทดลองไปตลาดจริง
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### IV. การแยกสภาพแวดล้อมและสิทธิ์เข้าถึง
+สภาพแวดล้อม Dev, Simulation และ Live ต้องแยกกันพร้อม Credential เฉพาะ
+API Key ต้องเก็บใน Secret ที่ป้องกันการรั่ว และทุกการหมุนเวียนสิทธิ์ต้องมีการ
+อนุมัติแบบ Role-based เฉพาะ Orchestrator เท่านั้นที่ถือกุญแจเทรดสด นักพัฒนา
+เข้าถึงผ่าน Control Plane ที่มี Log ตรวจสอบ เหตุผล: ลดความเสี่ยงยิงคำสั่งสด
+โดยไม่ได้ตั้งใจและจำกัดขอบเขตเมื่อเกิดเหตุรุนแรง
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+### V. การสังเกตการณ์และ Kill Switch
+ทุก Loop การเทรดต้องส่ง Log แบบมีโครงสร้าง ตัวชี้วัด Latency, สถานะ PnL และ
+Position ไปยังระบบมอนิเตอร์รวมพร้อม Alert แบบเรียลไทม์ ต้องมี Kill switch
+ทั้งแบบ Manual และอัตโนมัติที่กดได้ใน 1 นาที โดยค่าเริ่มต้นคือปิดโพซิชันและยกเลิก
+คำสั่งทั้งหมด คู่มือเหตุการณ์ต้องระบุค่าที่กระตุ้น Alert และเส้นทางสื่อสารชัดเจน
+เหตุผล: ตลาดคริปโตเปิด 24/7 หากไม่มีการมองเห็นและปุ่มหยุดฉุกเฉินจะเกิดการขาดทุน
+ทบต้นอย่างรวดเร็ว
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+## รั้วป้องกันเชิงปฏิบัติการ
+ระบบจะเทรดเฉพาะ Spot และ Derivative บนตลาดคริปโตที่มี API น่าเชื่อถือ มีระบบ
+สำรอง Websocket และเปิดให้บริการเชิงกฎหมายในเขตของเรา สินทรัพย์ที่รองรับต้องมี
+เกณฑ์สภาพคล่องและงบประมาณ Slippage ระบุไว้ การ Deploy ต้องบังคับ Sync เวลา
+ไม่เกิน 50 มิลลิวินาที และใช้ Sandbox ของตลาดก่อนรับ Credential หลัก ไลบรารีบุคคล
+ที่สามต้องผ่านการรีวิวความปลอดภัย และห้ามมีโค้ดที่ดาวน์โหลด Binary มารันขณะทำงาน
+ทุกการเปลี่ยน Infra ต้องมี IaC, การซ้อมกู้ระบบ และรายงานผลกระทบด้านต้นทุน
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+## เวิร์กโฟลว์การส่งมอบ
+เริ่มจาก Spec ที่กำหนดเป้าหมายเชิงตัวเลข (Win rate, Sharpe, Drawdown) พร้อมรั้ว
+ความเสี่ยงอ้างอิงหลักการที่ I แผนงานต้องแจกแจงนิยาม Indicator, แหล่งข้อมูล และ
+ขั้นตอนการยืนยันตามหลักการ II และ III งาน Implementation ต้องผูกกับ User Story
+อิสระเพื่อส่งมอบแบบไล่ขั้นตอนพร้อมรักษาการแยกสภาพแวดล้อมตามหลักการ IV ก่อน Merge
+Reviewer ต้องตรวจว่า Hook ด้าน Observability และ Trigger ของ Kill switch มีจริง
+(หลักการ V) และ CI ต้องรันชุดทดสอบ Simulation, Lint และ Deploy แบบ Dry-run ขั้นตอน
+ปล่อย: Research → Spec → Plan → Tasks → Implementation → Paper trade → Live Pilot
+พร้อมคู่มือ Rollback
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+## ธรรมาภิบาล
+รัฐธรรมนูญนี้อยู่เหนือเอกสารกระบวนการอื่นเมื่อเกี่ยวข้องกับการตัดสินใจเรื่องระบบ
+เทรดอัตโนมัติ การแก้ไขต้องมีข้อเสนอระบุหลักการที่ได้รับผลกระทบ วิเคราะห์ผลกับ
+กลยุทธ์ที่ใช้งาน และได้รับอนุมัติจากฝ่าย Research, Engineering และ Risk ใช้ Semantic
+Versioning: เพิ่ม Patch เมื่อแก้ถ้อยคำ เพิ่ม Minor เมื่อเพิ่มแนวทางใหม่ เพิ่ม Major
+เมื่อยกเลิก/ปรับหลักการ Ratification เกิดเมื่อ Merge เข้าสาขา `main` วันที่ให้การ
+รับรองคงเดิมจนกว่าจะตั้งใหม่ และต้องมีการตรวจสอบความสอดคล้องรายไตรมาสโดยสุ่ม
+Spec, Plan, Tasks ที่ใช้งานอยู่เพื่อยืนยันว่าหลักการถูกบังคับใช้ พร้อมเปิด Ticket แก้ไข
+เมื่อพบช่องว่าง
 
-## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
-
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
-
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**Version**: 1.0.1 | **Ratified**: 2025-11-24 | **Last Amended**: 2025-11-24

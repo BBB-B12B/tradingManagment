@@ -1,251 +1,254 @@
 ---
-
-description: "Task list template for feature implementation"
+description: "เทมเพลตรายการงานสำหรับพัฒนาฟีเจอร์"
 ---
 
 # Tasks: [FEATURE NAME]
 
-**Input**: Design documents from `/specs/[###-feature-name]/`
-**Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
+**รายละเอียด**: เอกสารเทมเพลตรายการงานสำหรับพัฒนาฟีเจอร์
 
-**Tests**: The examples below include test tasks. Tests are OPTIONAL - only include them if explicitly requested in the feature specification.
+**อินพุต**: เอกสารจาก `/specs/[###-feature-name]/`  
+**เงื่อนไขก่อนเริ่ม**: ต้องมี plan.md, spec.md (อธิบาย User Story), research.md, data-model.md, contracts/
 
-**Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
+**การทดสอบ**: ตัวอย่างด้านล่างมีงานทดสอบเพื่ออ้างอิง การเพิ่มงานทดสอบเป็นทางเลือก ให้เพิ่มเฉพาะเมื่อสเปคขอฟีเจอร์ทดสอบชัดเจน
 
-## Format: `[ID] [P?] [Story] Description`
+**การจัดระเบียบ**: จัดกลุ่มงานตาม User Story เพื่อให้แต่ละ Story พัฒนาและทดสอบได้อย่างอิสระ
 
-- **[P]**: Can run in parallel (different files, no dependencies)
-- **[Story]**: Which user story this task belongs to (e.g., US1, US2, US3)
-- Include exact file paths in descriptions
+## ฟอร์แมต: `[ID] [P?] [Story] คำอธิบาย`
 
-## Path Conventions
+- **[P]**: งานที่ทำขนานได้ (ไฟล์ต่างกัน ไม่มีพึ่งพา)
+- **[Story]**: รหัส User Story (เช่น US1, US2, US3)
+- ต้องระบุพาธไฟล์ที่แก้ไขให้ชัดเจนในคำอธิบาย
 
-- **Single project**: `src/`, `tests/` at repository root
-- **Web app**: `backend/src/`, `frontend/src/`
-- **Mobile**: `api/src/`, `ios/src/` or `android/src/`
-- Paths shown below assume single project - adjust based on plan.md structure
+## ข้อตกลงเรื่องพาธ
+
+- **โปรเจกต์เดี่ยว**: ใช้ `src/`, `tests/` จากรูทของ repo
+- **เว็บ**: ใช้ `backend/src/`, `frontend/src/`
+- **โมบาย**: ใช้ `api/src/`, `ios/src/` หรือ `android/src/`
+- โครงสร้างตัวอย่างด้านล่างอิงโปรเจกต์เดี่ยว ปรับตาม plan.md ของคุณ
+
+## การตามรอยรัฐธรรมนูญ *(บังคับ)*
+
+tasks.md ทุกไฟล์ต้องมีงานเฉพาะสำหรับ:
+
+- รั้วความเสี่ยง (ต่อเทรด/รายวัน/Drawdown) ผูกกับ Story ที่เกี่ยวข้อง
+- ความกำหนดซ้ำของ Indicator/ข้อมูล (เส้นทางคำนวณร่วม, snapshot schema, การจัดเวลา)
+- ด่านวิจัย (Backtest + Paper/Paper trade) ก่อนเปิดใช้จริง
+- การแยกสภาพแวดล้อม (Infra/Secret ที่ทำให้การเข้าถึงแยกกัน)
+- การสังเกตการณ์ + Kill switch (Metric, Alert, ปุ่ม Manual/Auto)
 
 <!-- 
   ============================================================================
-  IMPORTANT: The tasks below are SAMPLE TASKS for illustration purposes only.
-  
-  The /speckit.tasks command MUST replace these with actual tasks based on:
-  - User stories from spec.md (with their priorities P1, P2, P3...)
-  - Feature requirements from plan.md
-  - Entities from data-model.md
-  - Endpoints from contracts/
-  
-  Tasks MUST be organized by user story so each story can be:
-  - Implemented independently
-  - Tested independently
-  - Delivered as an MVP increment
-  
-  DO NOT keep these sample tasks in the generated tasks.md file.
+  หมายเหตุสำคัญ: งานด้านล่างเป็นเพียงตัวอย่าง
+  /speckit.tasks ต้องแทนที่ด้วยงานจริงจาก:
+  - User Story ใน spec.md (พร้อม Priority)
+  - ความต้องการจาก plan.md
+  - เอนทิตีใน data-model.md
+  - Endpoint ใน contracts/
+  งานต้องจัดตาม User Story เพื่อให้แต่ละ Story ส่งมอบเป็น MVP ได้
+  ห้ามคงงานตัวอย่างนี้ไว้ใน tasks.md ที่ส่งมอบ
   ============================================================================
 -->
 
-## Phase 1: Setup (Shared Infrastructure)
+## Phase 1: Setup (โครงสร้างพื้นฐานร่วม)
 
-**Purpose**: Project initialization and basic structure
+**เป้าหมาย**: ตั้งต้นโปรเจกต์และโครงสร้างพื้นฐาน
 
-- [ ] T001 Create project structure per implementation plan
-- [ ] T002 Initialize [language] project with [framework] dependencies
-- [ ] T003 [P] Configure linting and formatting tools
-
----
-
-## Phase 2: Foundational (Blocking Prerequisites)
-
-**Purpose**: Core infrastructure that MUST be complete before ANY user story can be implemented
-
-**⚠️ CRITICAL**: No user story work can begin until this phase is complete
-
-Examples of foundational tasks (adjust based on your project):
-
-- [ ] T004 Setup database schema and migrations framework
-- [ ] T005 [P] Implement authentication/authorization framework
-- [ ] T006 [P] Setup API routing and middleware structure
-- [ ] T007 Create base models/entities that all stories depend on
-- [ ] T008 Configure error handling and logging infrastructure
-- [ ] T009 Setup environment configuration management
-
-**Checkpoint**: Foundation ready - user story implementation can now begin in parallel
+- [ ] T001 สร้างโครงสร้างโปรเจกต์ตามแผน
+- [ ] T002 ตั้งค่าโปรเจกต์ภาษา [language] พร้อม dependency
+- [ ] T003 [P] ตั้งค่า Lint และเครื่องมือปรับฟอร์แมต
 
 ---
 
-## Phase 3: User Story 1 - [Title] (Priority: P1) 🎯 MVP
+## Phase 2: Foundational (งานบังคับก่อนเริ่ม Story)
 
-**Goal**: [Brief description of what this story delivers]
+**เป้าหมาย**: สร้างโครงสร้างหลักที่ Story ทุกตัวต้องพึ่งพา
 
-**Independent Test**: [How to verify this story works on its own]
+**⚠️ สำคัญ**: ห้ามเริ่มงานของ Story ใด ๆ ก่อนจบ Phase นี้
 
-### Tests for User Story 1 (OPTIONAL - only if tests requested) ⚠️
+ตัวอย่างงานพื้นฐาน (ปรับให้เหมาะกับโปรเจกต์):
 
-> **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
+- [ ] T004 ตั้งค่า Schema ฐานข้อมูลและระบบ Migration
+- [ ] T005 [P] ทำ Authentication/Authorization framework
+- [ ] T006 [P] จัดโครงสร้าง API routing และ middleware
+- [ ] T007 สร้าง model/entity ที่ทุก Story ใช้ร่วม
+- [ ] T008 ตั้งค่าการจัดการ error และ logging
+- [ ] T009 จัดการ configuration/s secrets ตามสภาพแวดล้อม
 
-- [ ] T010 [P] [US1] Contract test for [endpoint] in tests/contract/test_[name].py
-- [ ] T011 [P] [US1] Integration test for [user journey] in tests/integration/test_[name].py
-
-### Implementation for User Story 1
-
-- [ ] T012 [P] [US1] Create [Entity1] model in src/models/[entity1].py
-- [ ] T013 [P] [US1] Create [Entity2] model in src/models/[entity2].py
-- [ ] T014 [US1] Implement [Service] in src/services/[service].py (depends on T012, T013)
-- [ ] T015 [US1] Implement [endpoint/feature] in src/[location]/[file].py
-- [ ] T016 [US1] Add validation and error handling
-- [ ] T017 [US1] Add logging for user story 1 operations
-
-**Checkpoint**: At this point, User Story 1 should be fully functional and testable independently
+**Checkpoint**: โครงสร้างพร้อม → เริ่ม Story ได้แบบขนาน
 
 ---
 
-## Phase 4: User Story 2 - [Title] (Priority: P2)
+## Phase 3: User Story 1 - [ชื่อ] (Priority: P1) 🎯 MVP
 
-**Goal**: [Brief description of what this story delivers]
+**เป้าหมาย**: [สรุปว่าฟีเจอร์นี้ให้คุณค่าอะไร]
 
-**Independent Test**: [How to verify this story works on its own]
+**การทดสอบอิสระ**: [วิธีตรวจว่า Story นี้ทำงานครบด้วยตนเอง]
 
-### Tests for User Story 2 (OPTIONAL - only if tests requested) ⚠️
+### งานทดสอบสำหรับ User Story 1 (เพิ่มเมื่อสเปคระบุ) ⚠️
 
-- [ ] T018 [P] [US2] Contract test for [endpoint] in tests/contract/test_[name].py
-- [ ] T019 [P] [US2] Integration test for [user journey] in tests/integration/test_[name].py
+> **เขียนเทสก่อน และต้องเห็นว่าเทสล้มเหลว ก่อนเริ่มลงมือทำจริง**
 
-### Implementation for User Story 2
+- [ ] T010 [P] [US1] เทสสัญญา [endpoint] ที่ `tests/contract/test_[name].py`
+- [ ] T011 [P] [US1] เทสอินทิเกรต [user journey] ที่ `tests/integration/test_[name].py`
 
-- [ ] T020 [P] [US2] Create [Entity] model in src/models/[entity].py
-- [ ] T021 [US2] Implement [Service] in src/services/[service].py
-- [ ] T022 [US2] Implement [endpoint/feature] in src/[location]/[file].py
-- [ ] T023 [US2] Integrate with User Story 1 components (if needed)
+### งานพัฒนาสำหรับ User Story 1
 
-**Checkpoint**: At this point, User Stories 1 AND 2 should both work independently
+- [ ] T012 [P] [US1] สร้างโมเดล [Entity1] ที่ `src/models/[entity1].py`
+- [ ] T013 [P] [US1] สร้างโมเดล [Entity2] ที่ `src/models/[entity2].py`
+- [ ] T014 [US1] พัฒนาบริการ [Service] ที่ `src/services/[service].py` (พึ่ง T012, T013)
+- [ ] T015 [US1] ทำ [endpoint/feature] ที่ `src/[location]/[file].py`
+- [ ] T016 [US1] เพิ่มการตรวจสอบและจัดการ error
+- [ ] T017 [US1] เพิ่ม Logging สำหรับ Story นี้
 
----
-
-## Phase 5: User Story 3 - [Title] (Priority: P3)
-
-**Goal**: [Brief description of what this story delivers]
-
-**Independent Test**: [How to verify this story works on its own]
-
-### Tests for User Story 3 (OPTIONAL - only if tests requested) ⚠️
-
-- [ ] T024 [P] [US3] Contract test for [endpoint] in tests/contract/test_[name].py
-- [ ] T025 [P] [US3] Integration test for [user journey] in tests/integration/test_[name].py
-
-### Implementation for User Story 3
-
-- [ ] T026 [P] [US3] Create [Entity] model in src/models/[entity].py
-- [ ] T027 [US3] Implement [Service] in src/services/[service].py
-- [ ] T028 [US3] Implement [endpoint/feature] in src/[location]/[file].py
-
-**Checkpoint**: All user stories should now be independently functional
+**Checkpoint**: Story 1 ต้องใช้งานและทดสอบได้ในตัวเอง
 
 ---
 
-[Add more user story phases as needed, following the same pattern]
+## Phase 4: User Story 2 - [ชื่อ] (Priority: P2)
+
+**เป้าหมาย**: [อธิบายผลลัพธ์]
+
+**การทดสอบอิสระ**: [วิธีทดสอบ]
+
+### งานทดสอบสำหรับ User Story 2 (เพิ่มเมื่อจำเป็น) ⚠️
+
+- [ ] T018 [P] [US2] เทสสัญญา [endpoint] ที่ `tests/contract/test_[name].py`
+- [ ] T019 [P] [US2] เทสอินทิเกรต [user journey] ที่ `tests/integration/test_[name].py`
+
+### งานพัฒนาสำหรับ User Story 2
+
+- [ ] T020 [P] [US2] สร้างโมเดล [Entity] ที่ `src/models/[entity].py`
+- [ ] T021 [US2] พัฒนาบริการ [Service] ที่ `src/services/[service].py`
+- [ ] T022 [US2] ทำ [endpoint/feature] ที่ `src/[location]/[file].py`
+- [ ] T023 [US2] เชื่อมกับส่วนของ Story 1 (ถ้าจำเป็น)
+
+**Checkpoint**: Story 1 และ 2 ต้องทำงานได้อิสระครบทั้งคู่
 
 ---
 
-## Phase N: Polish & Cross-Cutting Concerns
+## Phase 5: User Story 3 - [ชื่อ] (Priority: P3)
 
-**Purpose**: Improvements that affect multiple user stories
+**เป้าหมาย**: [อธิบายผลลัพธ์]
 
-- [ ] TXXX [P] Documentation updates in docs/
-- [ ] TXXX Code cleanup and refactoring
-- [ ] TXXX Performance optimization across all stories
-- [ ] TXXX [P] Additional unit tests (if requested) in tests/unit/
-- [ ] TXXX Security hardening
-- [ ] TXXX Run quickstart.md validation
+**การทดสอบอิสระ**: [วิธีทดสอบ]
 
----
+### งานทดสอบสำหรับ User Story 3 (เพิ่มเมื่อจำเป็น) ⚠️
 
-## Dependencies & Execution Order
+- [ ] T024 [P] [US3] เทสสัญญา [endpoint] ที่ `tests/contract/test_[name].py`
+- [ ] T025 [P] [US3] เทสอินทิเกรต [user journey] ที่ `tests/integration/test_[name].py`
 
-### Phase Dependencies
+### งานพัฒนาสำหรับ User Story 3
 
-- **Setup (Phase 1)**: No dependencies - can start immediately
-- **Foundational (Phase 2)**: Depends on Setup completion - BLOCKS all user stories
-- **User Stories (Phase 3+)**: All depend on Foundational phase completion
-  - User stories can then proceed in parallel (if staffed)
-  - Or sequentially in priority order (P1 → P2 → P3)
-- **Polish (Final Phase)**: Depends on all desired user stories being complete
+- [ ] T026 [P] [US3] สร้างโมเดล [Entity] ที่ `src/models/[entity].py`
+- [ ] T027 [US3] พัฒนาบริการ [Service] ที่ `src/services/[service].py`
+- [ ] T028 [US3] ทำ [endpoint/feature] ที่ `src/[location]/[file].py`
 
-### User Story Dependencies
-
-- **User Story 1 (P1)**: Can start after Foundational (Phase 2) - No dependencies on other stories
-- **User Story 2 (P2)**: Can start after Foundational (Phase 2) - May integrate with US1 but should be independently testable
-- **User Story 3 (P3)**: Can start after Foundational (Phase 2) - May integrate with US1/US2 but should be independently testable
-
-### Within Each User Story
-
-- Tests (if included) MUST be written and FAIL before implementation
-- Models before services
-- Services before endpoints
-- Core implementation before integration
-- Story complete before moving to next priority
-
-### Parallel Opportunities
-
-- All Setup tasks marked [P] can run in parallel
-- All Foundational tasks marked [P] can run in parallel (within Phase 2)
-- Once Foundational phase completes, all user stories can start in parallel (if team capacity allows)
-- All tests for a user story marked [P] can run in parallel
-- Models within a story marked [P] can run in parallel
-- Different user stories can be worked on in parallel by different team members
+**Checkpoint**: ทุก Story ต้องทำงานได้อิสระครบถ้วน
 
 ---
 
-## Parallel Example: User Story 1
+[เพิ่ม Phase ของ Story อื่นตามรูปแบบเดียวกัน]
+
+---
+
+## Phase N: Polish & Cross-Cutting
+
+**เป้าหมาย**: ปรับปรุงที่กระทบหลาย Story
+
+- [ ] TXXX [P] อัปเดตเอกสารที่ `docs/`
+- [ ] TXXX เก็บกวาด/รีแฟกเตอร์
+- [ ] TXXX ปรับปรุงสมรรถนะครอบคลุมทุก Story
+- [ ] TXXX [P] เพิ่ม Unit test (เมื่อสเปคขอ) ที่ `tests/unit/`
+- [ ] TXXX เสริมความปลอดภัย
+- [ ] TXXX รันทดสอบ quickstart.md
+
+---
+
+## การพึ่งพาและลำดับทำงาน
+
+### การพึ่งพาตาม Phase
+
+- **Setup (Phase 1)**: ไม่พึ่งงานอื่น เริ่มได้ทันที
+- **Foundational (Phase 2)**: พึ่ง Phase 1 และบล็อกทุก Story
+- **User Stories (Phase 3+)**: ต้องรอ Phase 2 เสร็จก่อน แล้วทำแบบขนานหรือเรียงตาม P1 → P2 → P3
+- **Polish (Phase สุดท้าย)**: ทำหลัง Story ที่ต้องการเสร็จ
+
+### การพึ่งพาในแต่ละ Story
+
+- **User Story 1 (P1)**: เริ่มหลัง Phase 2 ไม่พึ่ง Story อื่น
+- **User Story 2 (P2)**: เริ่มหลัง Phase 2 อาจเชื่อมกับ US1 แต่ต้องทดสอบได้เอง
+- **User Story 3 (P3)**: เริ่มหลัง Phase 2 อาจเชื่อมกับ US1/US2 แต่ต้องทดสอบได้เอง
+
+### ภายใน Story หนึ่ง ๆ
+
+- เขียนเทส (ถ้ามี) ให้ล้มเหลวก่อนลงมือพัฒนา
+- ทำ Model ก่อน Service
+- ทำ Service ก่อน Endpoint
+- ทำแกนหลักก่อนเชื่อมต่อ
+- ปิด Story ให้สมบูรณ์ก่อนขยับไป Story ถัดไป
+
+### โอกาสทำงานขนาน
+
+- งาน Setup ที่ติด [P] ทำพร้อมกันได้
+- งาน Foundational ที่ติด [P] ทำพร้อมกันได้
+- หลังจบ Foundational ทุก Story เริ่มขนานได้ (ถ้ามีคนพอ)
+- เทสในแต่ละ Story ที่ติด [P] ทำขนานได้
+- Model ใน Story เดียวกันที่ติด [P] ทำขนานได้
+- แต่ละ Story มอบหมายให้คนละคนทำพร้อมกันได้
+
+---
+
+## ตัวอย่างการทำงานขนาน: User Story 1
 
 ```bash
-# Launch all tests for User Story 1 together (if tests requested):
-Task: "Contract test for [endpoint] in tests/contract/test_[name].py"
-Task: "Integration test for [user journey] in tests/integration/test_[name].py"
+# รันชุดเทสของ US1 พร้อมกัน (เมื่อมีการร้องขอเทส):
+Task: "Contract test for [endpoint] ใน tests/contract/test_[name].py"
+Task: "Integration test for [user journey] ใน tests/integration/test_[name].py"
 
-# Launch all models for User Story 1 together:
-Task: "Create [Entity1] model in src/models/[entity1].py"
-Task: "Create [Entity2] model in src/models/[entity2].py"
+# สร้างโมเดลของ US1 พร้อมกัน:
+Task: "Create [Entity1] model ใน src/models/[entity1].py"
+Task: "Create [Entity2] model ใน src/models/[entity2].py"
 ```
 
 ---
 
-## Implementation Strategy
+## กลยุทธ์การพัฒนา
 
-### MVP First (User Story 1 Only)
+### MVP ก่อน (เฉพาะ User Story 1)
 
-1. Complete Phase 1: Setup
-2. Complete Phase 2: Foundational (CRITICAL - blocks all stories)
-3. Complete Phase 3: User Story 1
-4. **STOP and VALIDATE**: Test User Story 1 independently
-5. Deploy/demo if ready
+1. จบ Phase 1: Setup
+2. จบ Phase 2: Foundational (สำคัญ บล็อกทุก Story)
+3. ทำ Phase 3: User Story 1
+4. **หยุดและตรวจสอบ**: ทดสอบ US1 ให้สมบูรณ์
+5. พร้อมแล้วค่อยดีพลอย/สาธิต
 
-### Incremental Delivery
+### ส่งมอบแบบเพิ่มทีละก้อน
 
-1. Complete Setup + Foundational → Foundation ready
-2. Add User Story 1 → Test independently → Deploy/Demo (MVP!)
-3. Add User Story 2 → Test independently → Deploy/Demo
-4. Add User Story 3 → Test independently → Deploy/Demo
-5. Each story adds value without breaking previous stories
+1. จบ Setup + Foundational → พื้นฐานพร้อม
+2. เพิ่ม US1 → ทดสอบ → Deploy/Demo (MVP)
+3. เพิ่ม US2 → ทดสอบ → Deploy/Demo
+4. เพิ่ม US3 → ทดสอบ → Deploy/Demo
+5. แต่ละ Story เพิ่มคุณค่าโดยไม่ทำลายของเดิม
 
-### Parallel Team Strategy
+### ทีมทำงานขนาน
 
-With multiple developers:
+เมื่อมีหลายคน:
 
-1. Team completes Setup + Foundational together
-2. Once Foundational is done:
-   - Developer A: User Story 1
-   - Developer B: User Story 2
-   - Developer C: User Story 3
-3. Stories complete and integrate independently
+1. ทีมช่วยกันทำ Setup + Foundational ให้เสร็จ
+2. หลังจากนั้น
+   - Dev A: US1
+   - Dev B: US2
+   - Dev C: US3
+3. แต่ละ Story จบและเชื่อมต่อกันภายหลัง
 
 ---
 
-## Notes
+## บันทึก
 
-- [P] tasks = different files, no dependencies
-- [Story] label maps task to specific user story for traceability
-- Each user story should be independently completable and testable
-- Verify tests fail before implementing
-- Commit after each task or logical group
-- Stop at any checkpoint to validate story independently
-- Avoid: vague tasks, same file conflicts, cross-story dependencies that break independence
+- งาน [P] = ไฟล์ต่างกัน ทำขนานได้
+- ป้าย [Story] ใช้ตามรอยงานกับ User Story
+- ทุก Story ต้องจบและทดสอบได้เอง
+- ตรวจว่าเทสล้มเหลวก่อนลงมือแก้ให้ผ่าน
+- ควรคอมมิตทุกครั้งที่จบงานย่อยหรือกลุ่มงาน
+- หยุดตรวจสอบเมื่อผ่าน Checkpoint สำคัญ
+- หลีกเลี่ยงงานกำกวม, แก้ไฟล์เดียวกันพร้อมกัน, หรือสร้างการพึ่งพาข้าม Story

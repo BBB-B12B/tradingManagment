@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "orchestrator"
+version = "0.1.0"
+description = "Order orchestration and risk enforcement"
+authors = ["CDC Bot Team"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.110.0"
+uvicorn = "^0.27.0"
+ccxt = "^4.0.0"
+redis = "^5.0.1"
+pydantic = "^2.6.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+black = "^24.1"
+
+[build-system]
+requires = ["poetry-core>=1.5.0"]
+build-backend = "poetry.core.masonry.api"

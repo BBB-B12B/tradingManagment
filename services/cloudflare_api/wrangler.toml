@@ -1,0 +1,11 @@
+name = "cdc-zone-worker"
+main = "src/index.ts"
+compatibility_date = "2025-11-24"
+
+[[d1_databases]]
+binding = "CDC_DB"
+database_name = "trading-management"
+database_id = "0561077b-195a-4cac-9f40-6e288b4c9692"
+
+[vars]
+ENV = "dev"

@@ -1,115 +1,117 @@
-# Feature Specification: [FEATURE NAME]
+# สเปคฟีเจอร์: [FEATURE NAME]
 
-**Feature Branch**: `[###-feature-name]`  
-**Created**: [DATE]  
-**Status**: Draft  
-**Input**: User description: "$ARGUMENTS"
+**สาขาฟีเจอร์**: `[###-feature-name]`  
+**วันที่สร้าง**: [DATE]  
+**สถานะ**: Draft  
+**อินพุต**: คำอธิบายจากผู้ใช้: "$ARGUMENTS"
 
-## User Scenarios & Testing *(mandatory)*
+## สถานการณ์ผู้ใช้และการทดสอบ *(บังคับ)*
 
 <!--
-  IMPORTANT: User stories should be PRIORITIZED as user journeys ordered by importance.
-  Each user story/journey must be INDEPENDENTLY TESTABLE - meaning if you implement just ONE of them,
-  you should still have a viable MVP (Minimum Viable Product) that delivers value.
-  
-  Assign priorities (P1, P2, P3, etc.) to each story, where P1 is the most critical.
-  Think of each story as a standalone slice of functionality that can be:
-  - Developed independently
-  - Tested independently
-  - Deployed independently
-  - Demonstrated to users independently
+  User Story ต้องจัดลำดับความสำคัญ (P1, P2, P3, ...)
+  แต่ละ Story ต้องทดสอบได้อย่างอิสระ หากทำได้เพียง Story เดียวก็ยังส่งมอบคุณค่าได้
+  ควรคิดเป็นเส้นทางผู้ใช้ตั้งแต่ต้นจนจบที่สามารถ:
+  - พัฒนาแยกกันได้
+  - ทดสอบแยกกันได้
+  - เปิดใช้งาน/ดีพลอยได้เอง
+  - สาธิตให้ผู้ใช้เห็นคุณค่าได้
 -->
 
-### User Story 1 - [Brief Title] (Priority: P1)
+### User Story 1 - [ชื่อสั้น ๆ] (Priority: P1)
 
-[Describe this user journey in plain language]
+[เล่าเส้นทางผู้ใช้นี้โดยใช้ภาษาปกติ]
 
-**Why this priority**: [Explain the value and why it has this priority level]
+**เหตุผลของลำดับความสำคัญ**: [อธิบายประโยชน์และเหตุผลที่จัดลำดับนี้]
 
-**Independent Test**: [Describe how this can be tested independently - e.g., "Can be fully tested by [specific action] and delivers [specific value]"]
+**การทดสอบอิสระ**: [วิธีทดสอบ Story นี้ให้จบในตัว เช่น “ทดสอบผ่าน [การกระทำ] เพื่อเห็น [คุณค่า]”]
 
-**Acceptance Scenarios**:
+**Acceptance Scenario**:
 
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-2. **Given** [initial state], **When** [action], **Then** [expected outcome]
-
----
-
-### User Story 2 - [Brief Title] (Priority: P2)
-
-[Describe this user journey in plain language]
-
-**Why this priority**: [Explain the value and why it has this priority level]
-
-**Independent Test**: [Describe how this can be tested independently]
-
-**Acceptance Scenarios**:
-
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
+1. **Given** [สถานะตั้งต้น], **When** [การกระทำ], **Then** [ผลลัพธ์ที่คาดหวัง]
+2. **Given** [สถานะตั้งต้น], **When** [การกระทำ], **Then** [ผลลัพธ์ที่คาดหวัง]
 
 ---
 
-### User Story 3 - [Brief Title] (Priority: P3)
+### User Story 2 - [ชื่อสั้น ๆ] (Priority: P2)
 
-[Describe this user journey in plain language]
+[อธิบายเส้นทางผู้ใช้]
 
-**Why this priority**: [Explain the value and why it has this priority level]
+**เหตุผลของลำดับความสำคัญ**: [เหตุผล]
 
-**Independent Test**: [Describe how this can be tested independently]
+**การทดสอบอิสระ**: [วิธีทดสอบ]
 
-**Acceptance Scenarios**:
+**Acceptance Scenario**:
 
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
+1. **Given** [สถานะตั้งต้น], **When** [การกระทำ], **Then** [ผลลัพธ์ที่คาดหวัง]
 
 ---
 
-[Add more user stories as needed, each with an assigned priority]
+### User Story 3 - [ชื่อสั้น ๆ] (Priority: P3)
 
-### Edge Cases
+[อธิบายเส้นทางผู้ใช้]
+
+**เหตุผลของลำดับความสำคัญ**: [เหตุผล]
+
+**การทดสอบอิสระ**: [วิธีทดสอบ]
+
+**Acceptance Scenario**:
+
+1. **Given** [สถานะตั้งต้น], **When** [การกระทำ], **Then** [ผลลัพธ์ที่คาดหวัง]
+
+---
+
+[เพิ่ม User Story เพิ่มเติมตามต้องการ พร้อม Priority ชัดเจน]
+
+### กรณีขอบ
 
 <!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right edge cases.
+  ต้องเติมเนื้อหาส่วนนี้ให้ครบ ระบุเงื่อนไขและสถานการณ์ผิดพลาดที่ต้องรองรับ
 -->
 
-- What happens when [boundary condition]?
-- How does system handle [error scenario]?
+- เกิดอะไรขึ้นเมื่อ [เงื่อนไขขอบเขต]?
+- ระบบจัดการอย่างไรเมื่อ [สถานการณ์ผิดพลาด]?
 
-## Requirements *(mandatory)*
+## การจัดแนว Risk & Validation *(บังคับตามรัฐธรรมนูญ)*
+
+- **Risk Guardrails**: ระบุ % ความเสี่ยงต่อการเทรด, ขีดจำกัดการขาดทุนรายวัน และตรรกะหยุด Drawdown สำหรับฟีเจอร์นี้
+- **Indicator Provenance**: อธิบาย Indicator/Data feed ทุกตัว ความละเอียด Timezone และวิธีจัดการเวอร์ชัน
+- **Validation Plan**: สรุป Backtest (≥3 ช่วงตลาด) และ Paper/Paper-trade (≥2 สัปดาห์หรือ 100 เทรด)
+- **Environment Segregation**: ระบุสภาพแวดล้อมที่เกี่ยวข้อง (research, sim, live) และวิธีแยก Secret
+- **Observability Hooks**: ลิสต์ Metric/Log/Alert และเส้นทาง Kill switch ที่ฟีเจอร์ต้องรองรับ
+
+## ความต้องการ *(บังคับ)*
 
 <!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right functional requirements.
+  ต้องแทนที่ทุก bullet ด้วยความต้องการจริง
 -->
 
 ### Functional Requirements
 
-- **FR-001**: System MUST [specific capability, e.g., "allow users to create accounts"]
-- **FR-002**: System MUST [specific capability, e.g., "validate email addresses"]  
-- **FR-003**: Users MUST be able to [key interaction, e.g., "reset their password"]
-- **FR-004**: System MUST [data requirement, e.g., "persist user preferences"]
-- **FR-005**: System MUST [behavior, e.g., "log all security events"]
+- **FR-001**: ระบบต้อง [ตัวอย่างเช่น “ให้ผู้ใช้สร้างบัญชีได้”]
+- **FR-002**: ระบบต้อง [ตัวอย่างเช่น “ตรวจสอบความถูกต้องของอีเมล”]  
+- **FR-003**: ผู้ใช้ต้องสามารถ [อินเทอร์แอ็กชันหลัก เช่น “รีเซ็ตรหัสผ่าน”]
+- **FR-004**: ระบบต้อง [ข้อกำหนดด้านข้อมูล เช่น “เก็บค่าการตั้งค่าผู้ใช้”]
+- **FR-005**: ระบบต้อง [พฤติกรรม เช่น “บันทึกเหตุการณ์ด้านความปลอดภัยทั้งหมด”]
 
-*Example of marking unclear requirements:*
+*ตัวอย่างการระบุสิ่งที่ยังไม่ชัดเจน:*
 
-- **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
-- **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
+- **FR-006**: ระบบต้องยืนยันตัวตนผ่าน [NEEDS CLARIFICATION: ยังไม่ระบุวิธี เช่น email/password, SSO, OAuth]
+- **FR-007**: ระบบต้องเก็บข้อมูลผู้ใช้เป็นเวลา [NEEDS CLARIFICATION: ยังไม่ระบุระยะเวลาเก็บ]
 
-### Key Entities *(include if feature involves data)*
+### เอนทิตีสำคัญ *(เติมเมื่อฟีเจอร์เกี่ยวข้องกับข้อมูล)*
 
-- **[Entity 1]**: [What it represents, key attributes without implementation]
-- **[Entity 2]**: [What it represents, relationships to other entities]
+- **[Entity 1]**: [อธิบายว่าแทนอะไร มีแอตทริบิวต์หลักอะไร]
+- **[Entity 2]**: [อธิบายและความสัมพันธ์กับเอนทิตีอื่น]
 
-## Success Criteria *(mandatory)*
+## เกณฑ์ความสำเร็จ *(บังคับ)*
 
 <!--
-  ACTION REQUIRED: Define measurable success criteria.
-  These must be technology-agnostic and measurable.
+  ต้องกำหนดตัวชี้วัดที่วัดได้ ชัดเจน และไม่ผูกกับเทคโนโลยีเฉพาะ
 -->
 
-### Measurable Outcomes
+### ตัวชี้วัดที่วัดได้
 
-- **SC-001**: [Measurable metric, e.g., "Users can complete account creation in under 2 minutes"]
-- **SC-002**: [Measurable metric, e.g., "System handles 1000 concurrent users without degradation"]
-- **SC-003**: [User satisfaction metric, e.g., "90% of users successfully complete primary task on first attempt"]
-- **SC-004**: [Business metric, e.g., "Reduce support tickets related to [X] by 50%"]
+- **SC-001**: [ตัวอย่าง: “ผู้ใช้สร้างบัญชีได้ภายใน 2 นาที”]
+- **SC-002**: [ตัวอย่าง: “ระบบรองรับผู้ใช้พร้อมกัน 1000 คนโดยไม่เสื่อม”]
+- **SC-003**: [ตัวอย่าง: “90% ของผู้ใช้สำเร็จภารกิจหลักในครั้งแรก”]
+- **SC-004**: [ตัวอย่าง: “ลด Ticket ฝ่ายซัพพอร์ตเรื่อง [X] ลง 50%”]

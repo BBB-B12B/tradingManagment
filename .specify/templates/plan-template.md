@@ -1,62 +1,64 @@
-# Implementation Plan: [FEATURE]
+# แผนการพัฒนา: [FEATURE]
 
-**Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
-**Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
+**สาขา**: `[###-feature-name]` | **วันที่**: [DATE] | **สเปค**: [link]  
+**อินพุต**: ข้อมูลจาก `/specs/[###-feature-name]/spec.md`
 
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
+**หมายเหตุ**: เทมเพลตนี้ถูกเติมโดยคำสั่ง `/speckit.plan` โปรดดูเวิร์กโฟลว์ได้ที่ `.specify/templates/commands/plan.md`
 
-## Summary
+## สรุปภาพรวม
 
-[Extract from feature spec: primary requirement + technical approach from research]
+[ดึงจากสเปค: ความต้องการหลัก + แนวทางเทคนิคจากงานวิจัย]
 
-## Technical Context
+## บริบททางเทคนิค
 
 <!--
-  ACTION REQUIRED: Replace the content in this section with the technical details
-  for the project. The structure here is presented in advisory capacity to guide
-  the iteration process.
+  ต้องแก้ไขเนื้อหาในส่วนนี้เป็นรายละเอียดเทคนิคจริงของโปรเจกต์
+  โครงสร้างด้านล่างเป็นคำแนะนำเพื่อช่วยจัดระเบียบข้อมูล
 -->
 
-**Language/Version**: [e.g., Python 3.11, Swift 5.9, Rust 1.75 or NEEDS CLARIFICATION]  
-**Primary Dependencies**: [e.g., FastAPI, UIKit, LLVM or NEEDS CLARIFICATION]  
-**Storage**: [if applicable, e.g., PostgreSQL, CoreData, files or N/A]  
-**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]  
-**Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
-**Project Type**: [single/web/mobile - determines source structure]  
-**Performance Goals**: [domain-specific, e.g., 1000 req/s, 10k lines/sec, 60 fps or NEEDS CLARIFICATION]  
-**Constraints**: [domain-specific, e.g., <200ms p95, <100MB memory, offline-capable or NEEDS CLARIFICATION]  
-**Scale/Scope**: [domain-specific, e.g., 10k users, 1M LOC, 50 screens or NEEDS CLARIFICATION]
+**ภาษา/เวอร์ชัน**: [เช่น Python 3.11, Swift 5.9, Rust 1.75 หรือ NEEDS CLARIFICATION]  
+**ไลบรารีหลัก**: [เช่น FastAPI, UIKit, LLVM หรือ NEEDS CLARIFICATION]  
+**ระบบจัดเก็บข้อมูล**: [เช่น PostgreSQL, CoreData, ไฟล์ หรือ N/A]  
+**เครื่องมือทดสอบ**: [เช่น pytest, XCTest, cargo test หรือ NEEDS CLARIFICATION]  
+**แพลตฟอร์มเป้าหมาย**: [เช่น Linux server, iOS 15+, WASM หรือ NEEDS CLARIFICATION]  
+**ประเภทโปรเจกต์**: [single/web/mobile เพื่อกำหนดโครงสร้างซอร์ส]  
+**เป้าหมายสมรรถนะ**: [เช่น 1000 req/s, 10k lines/sec, 60 fps หรือ NEEDS CLARIFICATION]  
+**ข้อจำกัด**: [เช่น <200ms p95, <100MB memory, offline-capable หรือ NEEDS CLARIFICATION]  
+**ขนาด/ขอบเขต**: [เช่น 10k users, 1M LOC, 50 screens หรือ NEEDS CLARIFICATION]
 
-## Constitution Check
+## การตรวจตามรัฐธรรมนูญ
 
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+*ด่านบังคับ: ต้องผ่านก่อนเริ่ม Phase 0 และทบทวนอีกครั้งหลัง Phase 1*
 
-[Gates determined based on constitution file]
+- **รักษาทุน**: อธิบายรั้วป้องกันความเสี่ยงต่อการเทรด รายวัน และ Drawdown พร้อมวิธีบังคับใช้ในโค้ด
+- **ความกำหนดซ้ำของ Indicator**: ระบุแหล่งข้อมูล การตั้งค่า Indicator และวิธีที่ Pipeline เวลาจริง/ย้อนหลังใช้เส้นทางเดียวกัน (เวอร์ชัน + Timestamp)
+- **ด่านวิจัย**: สรุป Backtest (≥3 ช่วงตลาด) และแผน Paper-trade ที่ตรงตามจำนวนเทรด/ช่วงเวลาขั้นต่ำ
+- **การแยกสภาพแวดล้อม**: ระบุสภาพแวดล้อม Credential และวิธีป้องกันไม่ให้ฟีเจอร์แชร์ Live API key นอก Orchestrator
+- **การสังเกตการณ์/ปุ่มหยุดฉุกเฉิน**: อธิบาย Metric/Log ที่ต้องส่ง ทริกเกอร์ของ Kill switch และแผน Rollback
 
-## Project Structure
+## โครงสร้างโปรเจกต์
 
-### Documentation (this feature)
+### เอกสาร (ฟีเจอร์นี้)
 
 ```text
 specs/[###-feature]/
-├── plan.md              # This file (/speckit.plan command output)
-├── research.md          # Phase 0 output (/speckit.plan command)
-├── data-model.md        # Phase 1 output (/speckit.plan command)
-├── quickstart.md        # Phase 1 output (/speckit.plan command)
-├── contracts/           # Phase 1 output (/speckit.plan command)
-└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+├── plan.md              # ไฟล์นี้ (ผลจากคำสั่ง /speckit.plan)
+├── research.md          # เอาต์พุต Phase 0 (/speckit.plan)
+├── data-model.md        # เอาต์พุต Phase 1 (/speckit.plan)
+├── quickstart.md        # เอาต์พุต Phase 1 (/speckit.plan)
+├── contracts/           # เอาต์พุต Phase 1 (/speckit.plan)
+└── tasks.md             # เอาต์พุต Phase 2 (/speckit.tasks - ไม่ได้สร้างโดย /speckit.plan)
 ```
 
-### Source Code (repository root)
+### ซอร์สโค้ด (รูทรายการ)
 <!--
-  ACTION REQUIRED: Replace the placeholder tree below with the concrete layout
-  for this feature. Delete unused options and expand the chosen structure with
-  real paths (e.g., apps/admin, packages/something). The delivered plan must
-  not include Option labels.
+  ต้องแทนที่โครงสร้างตัวอย่างด้วยโครงสร้างจริง
+  ลบตัวเลือกที่ไม่ได้ใช้และเติมพาธจริง (เช่น apps/admin, packages/something)
+  ผลลัพธ์สุดท้ายห้ามมีคำว่า Option
 -->
 
 ```text
-# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
+# [ลบหากไม่ใช้] ตัวเลือก 1: โปรเจกต์เดี่ยว (ค่าเริ่มต้น)
 src/
 ├── models/
 ├── services/
@@ -68,7 +70,7 @@ tests/
 ├── integration/
 └── unit/
 
-# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
+# [ลบหากไม่ใช้] ตัวเลือก 2: เว็บ (มี frontend + backend)
 backend/
 ├── src/
 │   ├── models/
@@ -83,22 +85,21 @@ frontend/
 │   └── services/
 └── tests/
 
-# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
+# [ลบหากไม่ใช้] ตัวเลือก 3: Mobile + API (เมื่อมี iOS/Android)
 api/
-└── [same as backend above]
+└── [เหมือน backend ข้างบน]
 
-ios/ or android/
-└── [platform-specific structure: feature modules, UI flows, platform tests]
+ios/ หรือ android/
+└── [โครงสร้างเฉพาะแพลตฟอร์ม: module ฟีเจอร์, flow UI, การทดสอบ]
 ```
 
-**Structure Decision**: [Document the selected structure and reference the real
-directories captured above]
+**เหตุผลการเลือกโครงสร้าง**: [อธิบายโครงสร้างที่เลือกและเชื่อมกับพาธจริงด้านบน]
 
-## Complexity Tracking
+## การติดตามความซับซ้อน
 
-> **Fill ONLY if Constitution Check has violations that must be justified**
+> **กรอกเฉพาะกรณีที่มีการละเมิดรัฐธรรมนูญและต้องขอยกเว้น**
 
-| Violation | Why Needed | Simpler Alternative Rejected Because |
-|-----------|------------|-------------------------------------|
-| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
-| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |
+| รายการละเมิด | เหตุจำเป็น | ทางเลือกที่ง่ายกว่าถูกปฏิเสธเพราะ |
+|--------------|------------|------------------------------------|
+| [เช่น เพิ่มโปรเจกต์ที่ 4] | [เหตุผลปัจจุบัน] | [เหตุใดใช้อีก 3 โปรเจกต์ไม่ได้] |
+| [เช่น ใช้ Repository Pattern] | [ปัญหาเฉพาะ] | [เหตุใดการเข้าถึง DB ตรงไม่พอ] |

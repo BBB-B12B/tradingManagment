@@ -1,0 +1,71 @@
+{
+  "pair": "BTC/THB",
+  "candles_ltf": [
+    {
+      "timestamp": "2025-11-25T05:00:00Z",
+      "open": 1480000,
+      "high": 1490000,
+      "low": 1475000,
+      "close": 1485000,
+      "volume": 100,
+      "cdc_color": "red"
+    },
+    {
+      "timestamp": "2025-11-25T06:00:00Z",
+      "open": 1485000,
+      "high": 1492000,
+      "low": 1482000,
+      "close": 1488000,
+      "volume": 120,
+      "cdc_color": "red"
+    },
+    {
+      "timestamp": "2025-11-25T07:00:00Z",
+      "open": 1488000,
+      "high": 1498000,
+      "low": 1486000,
+      "close": 1496000,
+      "volume": 150,
+      "cdc_color": "green"
+    },
+    {
+      "timestamp": "2025-11-25T08:00:00Z",
+      "open": 1496000,
+      "high": 1502000,
+      "low": 1492000,
+      "close": 1499000,
+      "volume": 160,
+      "cdc_color": "green"
+    },
+    {
+      "timestamp": "2025-11-25T09:00:00Z",
+      "open": 1499000,
+      "high": 1508000,
+      "low": 1497000,
+      "close": 1505000,
+      "volume": 180,
+      "cdc_color": "green"
+    }
+  ],
+  "candles_htf": [
+    {
+      "timestamp": "2025-11-18T00:00:00Z",
+      "open": 1450000,
+      "high": 1500000,
+      "low": 1440000,
+      "close": 1480000,
+      "volume": 3000,
+      "cdc_color": "red"
+    },
+    {
+      "timestamp": "2025-11-25T00:00:00Z",
+      "open": 1480000,
+      "high": 1520000,
+      "low": 1470000,
+      "close": 1500000,
+      "volume": 3500,
+      "cdc_color": "green"
+    }
+  ],
+  "macd_histogram": [-1.2, -0.4, 0.1, 0.3, 0.6]
+}
