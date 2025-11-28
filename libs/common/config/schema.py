@@ -5,11 +5,8 @@ from typing import Literal
 
 
 class RiskSettings(BaseModel):
-    per_trade_cap_pct: float = Field(default=0.01, le=0.01, gt=0)
-    daily_loss_breaker_pct: float = Field(default=0.03)
-    drawdown_breaker_pct: float = Field(default=0.05)
-    structural_sl_enabled: bool = Field(default=False)
-    structural_sl_buffer_pct: float = Field(default=0.003)
+    # Allow higher cap (เช่น 0.02 = 2%) และตัด field อื่นออกจากการตั้งค่า UI/แบ็กเทสต์
+    per_trade_cap_pct: float = Field(default=0.01, le=0.2, gt=0)
 
 
 class RuleParameters(BaseModel):

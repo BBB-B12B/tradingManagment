@@ -149,4 +149,92 @@ async def evaluate_all_configs(
     return {"count": len(summaries), "results": summaries}
 
 
+@router.get("/evaluate/historical")
+async def evaluate_historical_rules(
+    pair: str = Query(..., description="Trading pair, e.g., BTC/USDT"),
+    timeframe: Optional[str] = Query(None, description="Lower timeframe (defaults to config timeframe)"),
+    htf_timeframe: Optional[str] = Query(None, description="Higher timeframe (defaults to mapping)"),
+    limit: int = Query(DEFAULT_LTF_LIMIT, ge=30, le=500),
+) -> dict:
+    """Evaluate rules for each candle historically, not just current state.
+
+    Returns rule evaluation results for each candle so we can show
+    BUY markers at all historical points where rules passed.
+    """
+    cfg = config_store.get(pair.upper())
+    if not cfg:
+        raise HTTPException(status_code=404, detail=f"Config not found for pair {pair}")
+
+    ltf_interval = timeframe or cfg.timeframe
+    htf_interval = htf_timeframe or LTF_TO_HTF.get(ltf_interval, "1d")
+
+    try:
+        ltf_rows = await _market_client.get_candles(pair=pair, interval=ltf_interval, limit=limit)
+        htf_rows = await _market_client.get_candles(pair=pair, interval=htf_interval, limit=min(limit, 120))
+    except HTTPStatusError as exc:
+        content = exc.response.text
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch Binance data for {pair} ({ltf_interval}/{htf_interval}). Response: {content}",
+        ) from exc
+
+    ltf_candles = _decorate_candles(ltf_rows)
+    htf_candles = _decorate_candles(htf_rows)
+
+    # Evaluate rules for each LTF candle historically
+    historical_results = []
+
+    # We need at least 30 candles to evaluate rules properly
+    min_window = max(30, cfg.rule_params.lead_red_max_bars, cfg.rule_params.w_window_bars)
+
+    for i in range(min_window, len(ltf_candles)):
+        # Get candles up to this point
+        candles_up_to_i = ltf_candles[:i+1]
+
+        # Calculate MACD histogram up to this point
+        closes_up_to_i = [c.close for c in candles_up_to_i]
+        macd_hist_up_to_i = _macd_histogram(closes_up_to_i)
+
+        # Find corresponding HTF candle (match by timestamp)
+        current_ltf_time = candles_up_to_i[-1].timestamp
+        # Find HTF candle that contains this LTF timestamp
+        htf_idx = 0
+        for j, htf_candle in enumerate(htf_candles):
+            if htf_candle.timestamp <= current_ltf_time:
+                htf_idx = j
+
+        candles_htf_up_to_i = htf_candles[:htf_idx+1] if htf_idx < len(htf_candles) else htf_candles
+
+        # Evaluate rules at this point in time
+        result = evaluate_all_rules(
+            candles_ltf=candles_up_to_i,
+            candles_htf=candles_htf_up_to_i,
+            macd_histogram=macd_hist_up_to_i,
+            params=cfg.rule_params,
+            enable_w_shape_filter=cfg.enable_w_shape_filter,
+            enable_leading_signal=cfg.enable_leading_signal,
+        )
+
+        historical_results.append({
+            "candle_index": i,
+            "timestamp": ltf_rows[i]["open_time"],
+            "all_passed": result.summary["all_passed"],
+            "rules": {
+                "rule_1_cdc_green": result.summary["rule_1_cdc_green"],
+                "rule_2_leading_red": result.summary["rule_2_leading_red"],
+                "rule_3_leading_signal": result.summary["rule_3_leading_signal"],
+                "rule_4_pattern": result.summary["rule_4_pattern"],
+            }
+        })
+
+    return {
+        "pair": pair.upper(),
+        "ltf_timeframe": ltf_interval,
+        "htf_timeframe": htf_interval,
+        "total_candles": len(ltf_candles),
+        "evaluated_candles": len(historical_results),
+        "historical_results": historical_results,
+    }
+
+
 __all__ = ["router"]

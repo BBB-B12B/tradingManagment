@@ -9,11 +9,16 @@ from libs.common.config.schema import TradingConfiguration
 
 
 PAIR_SUGGESTIONS = [
-    "BTC/THB",
-    "ETH/THB",
-    "BNB/THB",
     "BTC/USDT",
     "ETH/USDT",
+    "BNB/USDT",
+    "SOL/USDT",
+    "ADA/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "AVAX/USDT",
+    "MATIC/USDT",
+    "DOT/USDT",
 ]
 
 TIMEFRAME_OPTIONS = ["15m", "1h", "4h", "1d", "1w"]
@@ -140,6 +145,7 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
       <div class="nav-links">
         <a href="/dashboard">📊 Dashboard</a>
         <a href="/ui/config">⚙️ Config</a>
+        <a href="/ui/backtest">🧪 Backtest</a>
         <a href="/reports/success">✅ Success Report</a>
         <a href="/docs">📘 API Docs</a>
       </div>
@@ -169,12 +175,10 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
           </datalist>
 
           <div class="field">
-            <label for="timeframe">Timeframe</label>
-            <input type="text" id="timeframe" name="timeframe" list="timeframe-options" placeholder="เช่น 1h, 4h" value="1h" required />
+            <label for="timeframe">Base Timeframe <span class="tooltip">?<span>ระบบใช้ Auto 3-Timeframe Analysis (1W → 1D → 1H) โดยอัตโนมัติ ค่านี้เป็น Base TF สำหรับ reference</span></span></label>
+            <input type="text" id="timeframe" name="timeframe" value="1d" readonly style="background: #f3f4f6; cursor: not-allowed;" />
+            <div class="helper">🔄 Auto 3-TF: 1W (Bull trend) → 1D (Pattern) → 1H (Entry/Exit)</div>
           </div>
-          <datalist id="timeframe-options">
-            {timeframe_options_html}
-          </datalist>
 
           <div class="field">
             <label for="budget_pct">Budget % ต่อการเทรด (เช่น 0.5 = 0.5%) <span class="tooltip">?<span>เปอร์เซ็นต์ของพอร์ตที่ยอมใช้ต่อดีล ตัวอย่าง 0.5 = 0.5% หรือ 0.8 = 0.8%</span></span></label>
@@ -193,36 +197,14 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
           <div class="section-title">Risk Settings</div>
           <div class="two-col">
             <div class="field">
-              <label for="per_trade_cap_pct">Per Trade Cap % <span class="tooltip">?<span>เพดานสูงสุดต่อ order หลังคำนวณ budget แล้ว เพื่อไม่ให้เทรดเกิน allocation</span></span></label>
-              <input type="number" step="0.0001" id="per_trade_cap_pct" list="risk-options" value="0.01" />
-              <div class="helper">เช่น 0.01 = 1% ของพอร์ต</div>
-            </div>
-            <div class="field">
-              <label for="daily_loss_breaker_pct">Daily Loss Breaker % <span class="tooltip">?<span>ขาดทุนรวมของวันถึงค่าที่กำหนดจะปิดระบบทั้งวัน</span></span></label>
-              <input type="number" step="0.0001" id="daily_loss_breaker_pct" list="risk-options" value="0.03" />
-              <div class="helper">0.03 = ติดลบ 3% ในวันนั้น → เปิด kill switch</div>
-            </div>
-            <div class="field">
-              <label for="drawdown_breaker_pct">Drawdown Breaker % <span class="tooltip">?<span>จาก equity สูงสุด หากลดลงถึง % นี้จะหยุดระบบ</span></span></label>
-              <input type="number" step="0.0001" id="drawdown_breaker_pct" list="risk-options" value="0.05" />
-              <div class="helper">มาตรฐาน CDC ~5%</div>
-            </div>
-            <div class="field">
-              <label for="structural_sl_buffer_pct">Structural SL Buffer % <span class="tooltip">?<span>ระยะเผื่อใต้ W-low เมื่อตั้ง stop loss ตามโครงสร้าง</span></span></label>
-              <input type="number" step="0.0001" id="structural_sl_buffer_pct" list="buffer-options" value="0.003" />
-              <div class="helper">0.3% = วาง SL ต่ำกว่า W-low 0.3%</div>
+              <label for="per_trade_cap_pct">Per Trade Cap % <span class="tooltip">?<span>สัดส่วนพอร์ตที่ยอมขาดทุนต่อดีล (ใช้คำนวณ position sizing กับระยะ cutloss)</span></span></label>
+              <input type="number" step="0.01" id="per_trade_cap_pct" list="risk-options" value="2" />
+              <div class="helper">เช่น 2 = 2% ของพอร์ต ใช้สูตร Position Size = (RiskAmount)/(Entry-Cutloss)</div>
             </div>
           </div>
           <datalist id="risk-options">
             {risk_options_html}
           </datalist>
-          <datalist id="buffer-options">
-            {buffer_options_html}
-          </datalist>
-
-          <div class="inline-checkbox" style="margin-top:0.8rem;">
-            <label><input type="checkbox" id="structural_sl_enabled" />Enable Structural SL</label>
-          </div>
 
           <button type="button" id="toggle-advanced" style="margin-top:1.5rem;">⚙️ Advance Settings</button>
           <div id="advanced-settings" style="display:none; margin-top:1rem;">
@@ -269,7 +251,7 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
           <thead>
             <tr>
               <th>Pair</th>
-              <th>Timeframe</th>
+              <th>Base TF</th>
               <th>Budget %</th>
               <th>W-Filter</th>
               <th>Leading Signal</th>
@@ -311,11 +293,7 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
         document.getElementById("enable_w_shape_filter").checked = cfg.enable_w_shape_filter;
         document.getElementById("enable_leading_signal").checked = cfg.enable_leading_signal;
 
-        document.getElementById("per_trade_cap_pct").value = cfg.risk.per_trade_cap_pct;
-        document.getElementById("daily_loss_breaker_pct").value = cfg.risk.daily_loss_breaker_pct;
-        document.getElementById("drawdown_breaker_pct").value = cfg.risk.drawdown_breaker_pct;
-        document.getElementById("structural_sl_enabled").checked = cfg.risk.structural_sl_enabled;
-        document.getElementById("structural_sl_buffer_pct").value = cfg.risk.structural_sl_buffer_pct;
+        document.getElementById("per_trade_cap_pct").value = toPercentInput(cfg.risk.per_trade_cap_pct);
 
         document.getElementById("lead_red_min_bars").value = cfg.rule_params.lead_red_min_bars;
         document.getElementById("lead_red_max_bars").value = cfg.rule_params.lead_red_max_bars;
@@ -384,11 +362,10 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
             enable_w_shape_filter: document.getElementById("enable_w_shape_filter").checked,
             enable_leading_signal: document.getElementById("enable_leading_signal").checked,
             risk: {{
-              per_trade_cap_pct: parseFloat(document.getElementById("per_trade_cap_pct").value),
-              daily_loss_breaker_pct: parseFloat(document.getElementById("daily_loss_breaker_pct").value),
-              drawdown_breaker_pct: parseFloat(document.getElementById("drawdown_breaker_pct").value),
-              structural_sl_enabled: document.getElementById("structural_sl_enabled").checked,
-              structural_sl_buffer_pct: parseFloat(document.getElementById("structural_sl_buffer_pct").value)
+              per_trade_cap_pct: (() => {{
+                const raw = parseFloat(document.getElementById("per_trade_cap_pct").value);
+                return isNaN(raw) ? 0 : raw / 100;
+              }})()
             }},
             rule_params: {{
               lead_red_min_bars: parseInt(document.getElementById("lead_red_min_bars").value),
@@ -409,8 +386,12 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
           }});
 
           if (!resp.ok) {{
-            const error = await resp.json();
-            throw new Error(error.detail || "บันทึกไม่สำเร็จ");
+            let message = "บันทึกไม่สำเร็จ";
+            try {{
+              const error = await resp.json();
+              message = typeof error === "string" ? error : (error.detail || JSON.stringify(error));
+            }} catch (_err) {{}}
+            throw new Error(message);
           }}
 
           const savedPair = payload.config.pair;

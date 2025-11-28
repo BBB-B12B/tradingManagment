@@ -64,6 +64,10 @@ export default {
         return handleCircuitBreaker(request, env, path, corsHeaders);
       }
 
+      if (path.startsWith('/config')) {
+        return handleConfigs(request, env, url, corsHeaders);
+      }
+
       return jsonResponse({ error: 'Not Found' }, corsHeaders, 404);
     } catch (error) {
       console.error('Error:', error);
@@ -347,6 +351,159 @@ async function handleSessions(
       success: true,
       session_id: result.meta.last_row_id
     }, corsHeaders);
+  }
+
+  return jsonResponse({ error: 'Method not allowed' }, corsHeaders, 405);
+}
+
+/**
+ * Trading config handlers
+ */
+async function handleConfigs(
+  request: Request,
+  env: Env,
+  url: URL,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  const method = request.method;
+  const path = url.pathname;
+
+  // GET /config/list - List all configs
+  if (path === '/config/list' && method === 'GET') {
+    const result = await env.CDC_DB.prepare(
+      'SELECT pair FROM trading_configurations ORDER BY pair'
+    ).all();
+
+    const pairs = result.results.map((row: any) => row.pair);
+    return jsonResponse({ pairs, count: pairs.length }, corsHeaders);
+  }
+
+  // GET /config?pair=BTC/THB - Get specific config
+  if (path === '/config' && method === 'GET') {
+    const pair = url.searchParams.get('pair');
+    if (!pair) {
+      return jsonResponse({ error: 'pair parameter required' }, corsHeaders, 400);
+    }
+
+    const result = await env.CDC_DB.prepare(
+      'SELECT * FROM trading_configurations WHERE pair = ?'
+    ).bind(pair.toUpperCase()).first();
+
+    if (!result) {
+      return jsonResponse({ error: 'config not found' }, corsHeaders, 404);
+    }
+
+    // Parse JSON fields
+    const config = {
+      pair: result.pair,
+      timeframe: result.timeframe,
+      enable_w_shape_filter: Boolean(result.enable_w_shape),
+      enable_leading_signal: Boolean(result.enable_leading_signal),
+      risk: JSON.parse(result.risk_json as string),
+      rule_params: JSON.parse(result.rule_params_json as string),
+    };
+
+    return jsonResponse(config, corsHeaders);
+  }
+
+  // POST /config - Upsert config
+  if (path === '/config' && method === 'POST') {
+    const body = await request.json() as any;
+    const { config } = body;
+
+    if (!config || !config.pair) {
+      return jsonResponse({ error: 'config.pair is required' }, corsHeaders, 400);
+    }
+
+    const pair = config.pair.toUpperCase();
+
+    // Check max configs limit (5)
+    const countResult = await env.CDC_DB.prepare(
+      'SELECT COUNT(*) as count FROM trading_configurations WHERE pair != ?'
+    ).bind(pair).first() as any;
+
+    if (countResult.count >= 5) {
+      const existing = await env.CDC_DB.prepare(
+        'SELECT * FROM trading_configurations WHERE pair = ?'
+      ).bind(pair).first();
+
+      if (!existing) {
+        return jsonResponse({
+          error: 'Maximum of 5 active configs reached. Please remove an existing pair before adding a new one.'
+        }, corsHeaders, 400);
+      }
+    }
+
+    // Serialize JSON fields
+    const riskJson = JSON.stringify(config.risk || {
+      per_trade_cap_pct: 0.1,
+      max_drawdown_pct: 20.0,
+      daily_loss_limit_pct: 5.0
+    });
+
+    const ruleParamsJson = JSON.stringify(config.rule_params || {
+      cdc_threshold: 0.0,
+      leading_signal_threshold: 0.0
+    });
+
+    // Check if exists
+    const existing = await env.CDC_DB.prepare(
+      'SELECT * FROM trading_configurations WHERE pair = ?'
+    ).bind(pair).first();
+
+    if (existing) {
+      // Update
+      await env.CDC_DB.prepare(
+        `UPDATE trading_configurations
+         SET timeframe = ?, enable_w_shape = ?, enable_leading_signal = ?,
+             risk_json = ?, rule_params_json = ?
+         WHERE pair = ?`
+      ).bind(
+        config.timeframe || '1d',
+        config.enable_w_shape_filter ? 1 : 0,
+        config.enable_leading_signal ? 1 : 0,
+        riskJson,
+        ruleParamsJson,
+        pair
+      ).run();
+    } else {
+      // Insert
+      const budgetPct = config.risk?.per_trade_cap_pct || 0.1;
+      await env.CDC_DB.prepare(
+        `INSERT INTO trading_configurations
+         (pair, timeframe, budget_pct, enable_w_shape, enable_leading_signal, risk_json, rule_params_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        pair,
+        config.timeframe || '1d',
+        budgetPct,
+        config.enable_w_shape_filter ? 1 : 0,
+        config.enable_leading_signal ? 1 : 0,
+        riskJson,
+        ruleParamsJson,
+        new Date().toISOString()
+      ).run();
+    }
+
+    return jsonResponse({ status: 'ok', pair }, corsHeaders);
+  }
+
+  // DELETE /config?pair=BTC/THB - Delete config
+  if (path === '/config' && method === 'DELETE') {
+    const pair = url.searchParams.get('pair');
+    if (!pair) {
+      return jsonResponse({ error: 'pair parameter required' }, corsHeaders, 400);
+    }
+
+    const result = await env.CDC_DB.prepare(
+      'DELETE FROM trading_configurations WHERE pair = ?'
+    ).bind(pair.toUpperCase()).run();
+
+    if ((result.meta.changes || 0) === 0) {
+      return jsonResponse({ error: 'config not found' }, corsHeaders, 404);
+    }
+
+    return jsonResponse({ status: 'deleted', pair: pair.toUpperCase() }, corsHeaders);
   }
 
   return jsonResponse({ error: 'Method not allowed' }, corsHeaders, 405);

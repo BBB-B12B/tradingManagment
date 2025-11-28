@@ -5,6 +5,7 @@ from __future__ import annotations
 NAV_LINKS = [
     ("/dashboard", "📊 Dashboard"),
     ("/ui/config", "⚙️ Config"),
+    ("/ui/backtest", "🧪 Backtest"),
     ("/reports/success", "✅ Success Report"),
     ("/docs", "📘 API Docs"),
 ]
