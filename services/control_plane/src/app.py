@@ -19,7 +19,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from routes import config, kill_switch, rules, positions, market, live_rules, backtest
+from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci
 from routes.config import _db as config_store, _load_configs_from_d1
 from telemetry.config_metrics import ConfigMetrics
 from telemetry.rule_metrics import RuleMetrics
@@ -48,6 +48,7 @@ app.include_router(positions.router)
 app.include_router(market.router)
 app.include_router(live_rules.router)
 app.include_router(backtest.router)
+app.include_router(fibonacci.router)
 
 config_metrics = ConfigMetrics()
 rule_metrics = RuleMetrics()
@@ -219,6 +220,31 @@ def build_chart_section() -> str:
       let data1w = null;
       let data1d = null;
       let data1h = null;
+
+      // Remove candles that have null/NaN prices or EMA to avoid chart errors
+      function sanitizeCandles(rawCandles, label) {
+        const cleaned = [];
+        let dropped = 0;
+
+        (rawCandles || []).forEach((c, idx) => {
+          const openTime = typeof c.open_time === "number" ? c.open_time : Number(c.open_time);
+          const numericFields = [c.open, c.high, c.low, c.close, c.ema_fast, c.ema_slow, openTime];
+          const hasAllNumbers = numericFields.every(v => Number.isFinite(v));
+
+          if (!hasAllNumbers) {
+            dropped += 1;
+            console.warn(`⚠️ Dropping invalid candle in ${label} at index ${idx}:`, c);
+            return;
+          }
+
+          cleaned.push({ ...c, open_time: openTime });
+        });
+
+        if (dropped > 0) {
+          console.warn(`⚠️ Sanitized ${label}: dropped ${dropped} invalid candles, kept ${cleaned.length}`);
+        }
+        return cleaned;
+      }
 
       // Fixed 3-Timeframe System: 1W → 1D → 1H
       // Always fetch these 3 timeframes for multi-timeframe validation
@@ -980,6 +1006,512 @@ def build_chart_section() -> str:
       }
 
       // ==========================================
+      // Fibonacci Retracement/Extension Functions
+      // ==========================================
+
+      let fibonacciSeries = []; // Store Fibonacci level series for cleanup
+      let waveObjects = []; // Store wave triangle/rectangle objects
+      let activeWaveId = null; // Currently selected wave
+
+      function clearFibonacciSeries() {
+        fibonacciSeries.forEach(series => tvChart.removeSeries(series));
+        fibonacciSeries = [];
+      }
+
+      async function drawFibonacciLevels(pair, timeframe) {
+        try {
+          // Clear previous Fibonacci lines and wave objects
+          clearFibonacciSeries();
+          clearWaveObjects();
+
+          // Fetch Wave patterns from API
+          const fibUrl = `/fibonacci?pair=${encodeURIComponent(pair)}&timeframe=${timeframe}&limit=1000`;
+          console.log('🌊 Fetching Wave patterns from:', fibUrl);
+
+          const response = await fetch(fibUrl);
+          if (!response.ok) {
+            console.warn('⚠️ Failed to fetch Wave data:', response.statusText);
+            return;
+          }
+
+          const fibData = await response.json();
+          console.log('🌊 Wave data:', fibData);
+
+          if (!fibData.has_waves || !fibData.waves || fibData.waves.length === 0) {
+            console.log('ℹ️ No wave patterns detected');
+            return;
+          }
+
+          console.log(`🌊 Found ${fibData.wave_count} wave patterns`);
+
+          // Draw Elliott Wave 1-2 patterns
+          // Blue = Wave 1 Low, Red = Wave 1 High, Green = Wave 2 Low
+          console.log(`📊 Total waves from API: ${fibData.waves.length}`);
+          fibData.waves.forEach((wave, idx) => {
+            console.log(`🔍 Processing wave ${wave.wave_id}:`, {
+              has_low1: !!wave.swing_low_1,
+              has_high: !!wave.swing_high,
+              has_low2: !!wave.swing_low_2,
+              fib_levels: wave.fib_levels?.length || 0
+            });
+
+            if (!wave.swing_low_1 || !wave.swing_high || !wave.swing_low_2) {
+              console.warn(`⚠️ Incomplete wave pattern ${wave.wave_id}`);
+              return;
+            }
+
+            // Wave 1 Low (blue)
+            const t1 = wave.swing_low_1.open_time ? Math.floor(wave.swing_low_1.open_time / 1000) : null;
+            const p1 = wave.swing_low_1.price;
+
+            // Wave 1 High (red)
+            const t2 = wave.swing_high.open_time ? Math.floor(wave.swing_high.open_time / 1000) : null;
+            const p2 = wave.swing_high.price;
+
+            // Wave 2 Low (green)
+            const t3 = wave.swing_low_2.open_time ? Math.floor(wave.swing_low_2.open_time / 1000) : null;
+            const p3 = wave.swing_low_2.price;
+
+            // Skip if any timestamp is invalid
+            if (!t1 || !t2 || !t3) {
+              console.warn(`⚠️ Invalid timestamps for wave ${wave.wave_id}:`, { t1, t2, t3 });
+              return;
+            }
+
+            console.log(`🌊 Wave ${wave.wave_id}:`, {
+              wave1_low: { index: wave.swing_low_1.index, price: p1 },
+              wave1_high: { index: wave.swing_high.index, price: p2 },
+              wave2_low: { index: wave.swing_low_2.index, price: p3 },
+            });
+
+            // Determine if this is a bear wave (Projection) or bull wave (Retracement)
+            const isBearWave = wave.wave_id.startsWith('bear');
+
+            // NOTE: No longer drawing dots here - we draw ALL dots from valid_bear_lows, invalid_bear_lows, and all_bull_highs
+            // This prevents duplicate dots and ensures every zone has exactly one dot
+
+            // Store wave object for click handling
+            // Bear wave: clickable at swing_low_1 (t1, p1) - blue dot (points to future)
+            // Bull wave: clickable at swing_high (t2, p2) - red dot
+            waveObjects.push({
+              waveId: wave.wave_id,
+              isBearWave: isBearWave,
+              fibLevels: wave.fib_levels || [],
+              showingProjection: false,
+              showingRetracement: false,
+              points: { t1, p1, t2, p2, t3, p3 },
+              clickableTime: isBearWave ? t1 : t2,  // Blue dot at t1 for bear, red dot at t2 for bull
+              clickablePrice: isBearWave ? p1 : p2,
+            });
+
+            console.log(`✅ Drew Elliott Wave ${wave.wave_id}`);
+          });
+
+          const bearCount = waveObjects.filter(w => w.isBearWave).length;
+          const bullCount = waveObjects.filter(w => !w.isBearWave).length;
+          console.log(`✅ Drew ${waveObjects.length} Elliott Wave patterns: ${bearCount} bear (Projection), ${bullCount} bull (Retracement)`);
+
+          // Draw invalid bear lows (green dots, non-clickable)
+          if (fibData.invalid_bear_lows && fibData.invalid_bear_lows.length > 0) {
+            console.log(`🟢 Found ${fibData.invalid_bear_lows.length} invalid bear lows (green dots)`);
+
+            fibData.invalid_bear_lows.forEach((invalidLow, idx) => {
+              const timestamp = invalidLow.open_time ? Math.floor(invalidLow.open_time / 1000) : null;
+              const price = invalidLow.price;
+
+              if (!timestamp || !price) {
+                console.warn(`⚠️ Invalid timestamp or price for invalid bear low at index ${invalidLow.index}`);
+                return;
+              }
+
+              console.log(`🟢 Invalid bear low ${idx + 1}: Index ${invalidLow.index}, Price ${price}`);
+
+              // Create green dot (non-clickable, slightly transparent)
+              const invalidLowDot = tvChart.addLineSeries({
+                color: '#10b981',  // Green (same as Wave 2 Low)
+                lineWidth: 0,
+                pointMarkersVisible: true,
+                pointMarkersRadius: 4,
+                title: '',
+                priceLineVisible: false,
+                lastValueVisible: false,
+                crosshairMarkerVisible: false,
+              });
+              invalidLowDot.setData([{ time: timestamp, value: price }]);
+              fibonacciSeries.push(invalidLowDot);
+            });
+
+            console.log(`✅ Drew ${fibData.invalid_bear_lows.length} invalid bear low markers (green, non-clickable)`);
+          }
+
+          // Draw ALL bull highs (red dots, always displayed)
+          if (fibData.all_bull_highs && fibData.all_bull_highs.length > 0) {
+            console.log(`🔴 Found ${fibData.all_bull_highs.length} bull highs (red dots)`);
+
+            fibData.all_bull_highs.forEach((bullHigh, idx) => {
+              const timestamp = bullHigh.open_time ? Math.floor(bullHigh.open_time / 1000) : null;
+              const price = bullHigh.price;
+
+              if (!timestamp || !price) {
+                console.warn(`⚠️ Invalid timestamp or price for bull high at index ${bullHigh.index}`);
+                return;
+              }
+
+              console.log(`🔴 Bull high ${idx + 1}: Index ${bullHigh.index}, Price ${price}`);
+
+              // Create red dot (clickable for Retracement)
+              const bullHighDot = tvChart.addLineSeries({
+                color: '#ef4444',  // Red
+                lineWidth: 0,
+                pointMarkersVisible: true,
+                pointMarkersRadius: 4,
+                title: '',
+                priceLineVisible: false,
+                lastValueVisible: false,
+                crosshairMarkerVisible: false,
+              });
+              bullHighDot.setData([{ time: timestamp, value: price }]);
+              fibonacciSeries.push(bullHighDot);
+            });
+
+            console.log(`✅ Drew ${fibData.all_bull_highs.length} bull high markers (red)`);
+          }
+
+          // Draw valid bear lows (blue dots, clickable for Projection)
+          if (fibData.valid_bear_lows && fibData.valid_bear_lows.length > 0) {
+            console.log(`🔵 Found ${fibData.valid_bear_lows.length} valid bear lows (blue dots)`);
+
+            fibData.valid_bear_lows.forEach((validLow, idx) => {
+              const timestamp = validLow.open_time ? Math.floor(validLow.open_time / 1000) : null;
+              const price = validLow.price;
+
+              if (!timestamp || !price) {
+                console.warn(`⚠️ Invalid timestamp or price for valid bear low at index ${validLow.index}`);
+                return;
+              }
+
+              console.log(`🔵 Valid bear low ${idx + 1}: Index ${validLow.index}, Price ${price}`);
+
+              // Create blue dot (clickable for Projection)
+              const validLowDot = tvChart.addLineSeries({
+                color: '#2563eb',  // Blue
+                lineWidth: 0,
+                pointMarkersVisible: true,
+                pointMarkersRadius: 4,
+                title: '',
+                priceLineVisible: false,
+                lastValueVisible: false,
+                crosshairMarkerVisible: false,
+              });
+              validLowDot.setData([{ time: timestamp, value: price }]);
+              fibonacciSeries.push(validLowDot);
+            });
+
+            console.log(`✅ Drew ${fibData.valid_bear_lows.length} valid bear low markers (blue)`);
+          }
+
+          // No wave markers for now (using LineSeries instead)
+          window.waveMarkers = [];
+
+          // Add click handler for wave objects
+          if (waveObjects.length > 0) {
+            chartContainer.addEventListener('click', handleWaveClick);
+            console.log('✅ Added click handler for wave objects');
+          }
+
+        } catch (error) {
+          console.error('❌ Error drawing Wave patterns:', error);
+        }
+      }
+
+      function clearWaveObjects() {
+        waveObjects.forEach(obj => {
+          if (obj.fibSeries) {
+            obj.fibSeries.forEach(series => tvChart.removeSeries(series));
+          }
+        });
+        waveObjects = [];
+        activeWaveId = null;
+        window.waveMarkers = [];
+        chartContainer.removeEventListener('click', handleWaveClick);
+      }
+
+      function handleWaveClick(event) {
+        // Click handler:
+        // - Click on Wave 1 Low (blue dot) → Show Projection (bullish targets)
+        // - Click on Wave 1 High (red dot) → Show Retracement (bearish levels)
+        const rect = chartContainer.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+
+        console.log('Click detected at pixel x:', x);
+
+        const CLICK_THRESHOLD = 40; // pixels
+        const timeScale = tvChart.timeScale();
+
+        // Check all three points for each wave: Low, High, Wave2Low
+        let closestMatch = null;
+        let minDistance = Infinity;
+
+        waveObjects.forEach((wave, idx) => {
+          // Check clickable point (blue for bear, red for bull)
+          const clickCoord = timeScale.timeToCoordinate(wave.clickableTime);
+          if (clickCoord !== null) {
+            const dx = Math.abs(x - clickCoord);
+            if (dx < minDistance && dx < CLICK_THRESHOLD) {
+              minDistance = dx;
+              closestMatch = { waveIndex: idx, pointType: wave.isBearWave ? 'low' : 'high' };
+            }
+          }
+        });
+
+        if (closestMatch) {
+          const wave = waveObjects[closestMatch.waveIndex];
+          console.log(`✅ Clicked on ${wave.waveId} ${closestMatch.pointType}, distance: ${minDistance.toFixed(2)}px`);
+
+          // Close all other waves first
+          waveObjects.forEach((w, idx) => {
+            if (idx !== closestMatch.waveIndex) {
+              hideWaveFibonacci(idx);
+            }
+          });
+
+          // Toggle this wave with the appropriate type
+          if (closestMatch.pointType === 'low') {
+            // Click on Low → Show Projection (or hide if already showing projection)
+            toggleWaveProjection(closestMatch.waveIndex);
+          } else if (closestMatch.pointType === 'high') {
+            // Click on High → Show Retracement (or hide if already showing retracement)
+            toggleWaveRetracement(closestMatch.waveIndex);
+          }
+        } else {
+          console.log('No wave point close enough to click (threshold: ' + CLICK_THRESHOLD + 'px)');
+        }
+      }
+
+      function hideWaveFibonacci(waveIndex) {
+        const wave = waveObjects[waveIndex];
+        if (!wave) return;
+
+        // Hide all Fibonacci levels
+        if (wave.projectionSeries) {
+          wave.projectionSeries.forEach(series => tvChart.removeSeries(series));
+          wave.projectionSeries = [];
+        }
+        if (wave.retracementSeries) {
+          wave.retracementSeries.forEach(series => tvChart.removeSeries(series));
+          wave.retracementSeries = [];
+        }
+
+        // Reference lines
+        if (wave.referenceSeries) {
+          wave.referenceSeries.forEach(series => tvChart.removeSeries(series));
+          wave.referenceSeries = [];
+        }
+
+        // Hide highlights (deprecated)
+        if (wave.lowHighlightSeries) {
+          wave.lowHighlightSeries.applyOptions({ pointMarkersVisible: false });
+        }
+        if (wave.highHighlightSeries) {
+          wave.highHighlightSeries.applyOptions({ pointMarkersVisible: false });
+        }
+
+        wave.showingProjection = false;
+        wave.showingRetracement = false;
+      }
+
+      function toggleWaveProjection(waveIndex) {
+        const wave = waveObjects[waveIndex];
+        if (!wave) return;
+
+        // Toggle projection
+        if (wave.showingProjection) {
+          // Hide projection
+          if (wave.projectionSeries) {
+            wave.projectionSeries.forEach(series => tvChart.removeSeries(series));
+            wave.projectionSeries = [];
+          }
+          // Hide highlight
+          if (wave.lowHighlightSeries) {
+            wave.lowHighlightSeries.applyOptions({ pointMarkersVisible: false });
+          }
+          wave.showingProjection = false;
+          console.log(`ℹ️ Hid Projection for ${wave.waveId}`);
+        } else {
+          // Show projection (reduced levels: 38.2%, 61.8%, 100%, 161.8%, 261.8%)
+          // IMPORTANT: Projection base is p3 (green dot - swing_low_2)
+          // Formula: p3 + (Wave1Range × ratio), where Wave1Range = p2 - p1
+          const wave1Range = wave.points.p2 - wave.points.p1;
+          const projectionBase = wave.points.p3;  // Start from green dot (swing_low_2)
+
+          const projectionLevels = [
+            { ratio: 0.382, label: '38.2%', price: projectionBase + (wave1Range * 0.382) },
+            { ratio: 0.618, label: '61.8%', price: projectionBase + (wave1Range * 0.618) },
+            { ratio: 1.000, label: '100%', price: projectionBase + wave1Range },
+            { ratio: 1.618, label: '161.8%', price: projectionBase + (wave1Range * 1.618) },
+            { ratio: 2.618, label: '261.8%', price: projectionBase + (wave1Range * 2.618) },
+          ];
+
+          const projectionColors = {
+            '38.2%': '#22c55e',  // Green
+            '61.8%': '#16a34a',  // Darker green
+            '100%': '#15803d',   // Even darker green
+            '161.8%': '#fbbf24', // Yellow/gold (primary target)
+            '261.8%': '#f59e0b'  // Orange
+          };
+
+          wave.projectionSeries = [];
+          projectionLevels.forEach(level => {
+            const color = projectionColors[level.label] || '#10b981';
+            const fibLineWidth = (level.label === '161.8%') ? 4 : 3;  // Thicker lines
+
+            const priceLine = tvChart.addLineSeries({
+              color: color,
+              lineWidth: fibLineWidth,
+              lineStyle: level.label === '161.8%' ? 0 : 2,
+              priceLineVisible: false,
+              lastValueVisible: true,
+              crosshairMarkerVisible: false,
+              title: `${wave.waveId} Proj ${level.label}`,
+            });
+
+            // Make line span entire chart (10 years back, 2 years forward)
+            const now = Math.floor(Date.now() / 1000);
+            const lineData = [
+              { time: now - (10 * 365 * 24 * 60 * 60), value: level.price },  // 10 years back
+              { time: now + (2 * 365 * 24 * 60 * 60), value: level.price }     // 2 years forward
+            ];
+
+            priceLine.setData(lineData);
+            wave.projectionSeries.push(priceLine);
+          });
+
+          // Draw connecting lines to show reference points (FORWARD direction)
+          // For Projection: t1 (Blue Low) → t2 (Orange High) → t3 (Green Low)
+          // Pattern must be: Index t1 < t2 < t3 (chronologically forward)
+          const referenceLineSeries = tvChart.addLineSeries({
+            color: '#fbbf24',  // Yellow/Orange
+            lineWidth: 2,
+            lineStyle: 1,  // Dotted line
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+            title: '',
+          });
+
+          // Sort by time: t1 < t2 < t3
+          const refLineData = [
+            { time: wave.points.t1, value: wave.points.p1 },  // Low1 (blue - earliest)
+            { time: wave.points.t2, value: wave.points.p2 },  // High (orange - middle)
+            { time: wave.points.t3, value: wave.points.p3 },  // Low2 (green - latest)
+          ];
+          console.log(`📏 Reference line for ${wave.waveId}:`, {
+            t1: new Date(wave.points.t1 * 1000).toISOString().split('T')[0],
+            p1: wave.points.p1,
+            t2: new Date(wave.points.t2 * 1000).toISOString().split('T')[0],
+            p2: wave.points.p2,
+            t3: new Date(wave.points.t3 * 1000).toISOString().split('T')[0],
+            p3: wave.points.p3,
+          });
+          referenceLineSeries.setData(refLineData);
+          wave.projectionSeries.push(referenceLineSeries);
+
+          // Show yellow highlight on low dot
+          if (wave.lowHighlightSeries) {
+            wave.lowHighlightSeries.applyOptions({ pointMarkersVisible: true });
+          }
+
+          wave.showingProjection = true;
+          console.log(`✅ Showed Projection for ${wave.waveId}`);
+        }
+      }
+
+      function toggleWaveRetracement(waveIndex) {
+        const wave = waveObjects[waveIndex];
+        if (!wave) return;
+
+        // Toggle retracement
+        if (wave.showingRetracement) {
+          // Hide retracement
+          if (wave.retracementSeries) {
+            wave.retracementSeries.forEach(series => tvChart.removeSeries(series));
+            wave.retracementSeries = [];
+          }
+          // Hide highlight
+          if (wave.highHighlightSeries) {
+            wave.highHighlightSeries.applyOptions({ pointMarkersVisible: false });
+          }
+          wave.showingRetracement = false;
+          console.log(`ℹ️ Hid Retracement for ${wave.waveId}`);
+        } else {
+          // Show retracement (0%, 61.8%, 78.6%, 88.7%, 94.2%, 100%)
+          console.log(`🔮 Showing Retracement for ${wave.waveId}, fibLevels:`, wave.fibLevels);
+
+          // Use darker, more vibrant purple/magenta colors
+          const retracementColors = {
+            '0%': '#e879f9',    // Light magenta
+            '61.8%': '#d946ef', // Magenta
+            '78.6%': '#c026d3', // Fuchsia (important level)
+            '88.7%': '#a21caf', // Purple (important level)
+            '94.2%': '#86198f', // Dark purple
+            '100%': '#701a75'   // Darkest purple
+          };
+
+          wave.retracementSeries = [];
+          wave.fibLevels.forEach(level => {
+            const color = retracementColors[level.label] || '#a855f7';
+            const fibLineWidth = (level.label === '78.6%' || level.label === '88.7%') ? 4 : 3;  // Thicker lines
+
+            const priceLine = tvChart.addLineSeries({
+              color: color,
+              lineWidth: fibLineWidth,
+              lineStyle: 2,
+              priceLineVisible: false,
+              lastValueVisible: true,
+              crosshairMarkerVisible: false,
+              title: `${wave.waveId} Ret ${level.label}`,
+            });
+
+            // Make line span entire chart (10 years back, 2 years forward)
+            const now = Math.floor(Date.now() / 1000);
+            const lineData = [
+              { time: now - (10 * 365 * 24 * 60 * 60), value: level.price },  // 10 years back
+              { time: now + (2 * 365 * 24 * 60 * 60), value: level.price }     // 2 years forward
+            ];
+
+            priceLine.setData(lineData);
+            wave.retracementSeries.push(priceLine);
+          });
+
+          // Draw connecting lines to show reference points (Low → High)
+          const referenceLineSeries = tvChart.addLineSeries({
+            color: '#fbbf24',  // Yellow
+            lineWidth: 2,
+            lineStyle: 1,  // Dotted line
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+            title: '',
+          });
+
+          const refLineData = [
+            { time: wave.points.t1, value: wave.points.p1 },  // Wave 1 Low
+            { time: wave.points.t2, value: wave.points.p2 },  // Wave 1 High
+          ];
+          referenceLineSeries.setData(refLineData);
+          wave.retracementSeries.push(referenceLineSeries);
+
+          // Show yellow highlight on high dot
+          if (wave.highHighlightSeries) {
+            wave.highHighlightSeries.applyOptions({ pointMarkersVisible: true });
+          }
+
+          wave.showingRetracement = true;
+          console.log(`✅ Showed Retracement for ${wave.waveId}`);
+        }
+      }
+
+      // ==========================================
       // Multi-Timeframe Validation Functions
       // ==========================================
 
@@ -1206,6 +1738,11 @@ def build_chart_section() -> str:
           data1d = await resp1d.json();
           data1h = await resp1h.json();
 
+          // Drop any candles with null/NaN to prevent "Value is null" crashes
+          data1w.candles = sanitizeCandles(data1w.candles, "1W");
+          data1d.candles = sanitizeCandles(data1d.candles, "1D");
+          data1h.candles = sanitizeCandles(data1h.candles, "1H");
+
           console.log("📦 1W candles:", data1w.candles?.length || 0);
           console.log("📦 1D candles:", data1d.candles?.length || 0);
           console.log("📦 1H candles:", data1h.candles?.length || 0);
@@ -1337,7 +1874,6 @@ def build_chart_section() -> str:
 
           // Store candle data for tooltips
           candleData = data.candles || [];
-          markerDataMap.clear();
 
           // Clear previous zone series
           clearZoneSeries();
@@ -1809,11 +2345,24 @@ def build_chart_section() -> str:
             }
           }
 
-          candleSeries.setMarkers(markers);
-          console.log("📍 Added", markers.length, "buy/sell markers");
+          // Draw Fibonacci wave objects FIRST to populate window.waveMarkers
+          console.log("🌊 About to draw Fibonacci wave objects...");
+          await drawFibonacciLevels(pair, displayTF);
+          console.log("🌊 Finished drawing Fibonacci wave objects");
+
+          // Merge buy/sell markers with wave markers
+          const allMarkers = [...markers];
+          if (window.waveMarkers && window.waveMarkers.length > 0) {
+            allMarkers.push(...window.waveMarkers);
+            console.log(`📍 Merging ${markers.length} buy/sell markers + ${window.waveMarkers.length} wave markers`);
+          }
+
+          candleSeries.setMarkers(allMarkers);
+          console.log("📍 Added", allMarkers.length, "total markers");
 
           tvChart.timeScale().fitContent();
           console.log("✅ Chart loaded successfully with", candles.length, "candles");
+          console.log("🔵 ========== loadCandles() FINISHED ==========");
         } catch (err) {
           console.error("💥 Error loading candles:", err);
           alert("เกิดข้อผิดพลาดในการโหลดกราฟ: " + err.message);
