@@ -1,0 +1,16 @@
+# Keep uploads lean and reduce watcher churn
+.git/
+node_modules/
+dist/
+build/
+.parcel-cache/
+.wrangler/state/
+.wrangler/tmp/
+.wrangler/.modules-cache/
+.DS_Store
+._*
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+tmp/

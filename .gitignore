@@ -1,0 +1,31 @@
+# macOS metadata
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Environment / secrets
+.env
+.env.*
+
+# Node / JS build output
+node_modules/
+dist/
+build/
+.parcel-cache/
+.next/
+
+# Wrangler local state/cache
+services/cloudflare_api/.wrangler/state/
+services/cloudflare_api/.wrangler/tmp/
+services/cloudflare_api/.wrangler/.modules-cache/
+
+# IDE
+.vscode/
