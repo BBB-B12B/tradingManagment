@@ -14,6 +14,7 @@ from libs.common.cdc_rules.types import Candle, CDCColor
 from libs.common.cdc_rules.pattern_classifier import classify_pattern
 from routes.config import _db as config_store
 from indicators.action_zone import compute_action_zone
+from indicators.fibonacci import get_fibonacci_analysis, trace_wave_from_entry
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
 
@@ -286,6 +287,14 @@ def _find_sell_exit_on_lower_tf(start_ts_ms: int, lower_tf_candles: List[dict]) 
     return None
 
 
+def _trace_wave_for_entry(decorated_ltf: List[Dict], entry_open_time: int) -> Optional[dict]:
+    """
+    Trace Elliott Wave structure from entry point using EMA crossover zones.
+    This matches the frontend's traceWaveStructureFromBuyArrow() logic.
+    """
+    return trace_wave_from_entry(decorated_ltf, entry_open_time)
+
+
 def _run_backtest(
     candles_ltf: List[Candle],
     decorated_ltf: List[dict],
@@ -299,6 +308,8 @@ def _run_backtest(
     enable_leading_signal: bool,
     initial_capital: float,
     per_trade_cap_pct: float,
+    use_trailing_stop: bool,
+    wave_structures: List[dict],
 ) -> Dict[str, Any]:
     trades: List[dict] = []
     in_position = False
@@ -313,6 +324,13 @@ def _run_backtest(
     use_historical_path = lower_tf_start is None
     htf_idx = 0
     equity = 1.0
+
+    # Trailing Stop variables
+    trailing_stop_price: Optional[float] = None
+    trailing_stop_activated: bool = False
+    trailing_stop_activation_price: Optional[float] = None
+    prev_high: float = 0.0
+    next_sl: Optional[float] = None  # Lagging indicator: SL to be used in NEXT candle
 
     for idx, candle in enumerate(candles_ltf):
         if idx < 2:
@@ -367,6 +385,33 @@ def _run_backtest(
             entry_time = candle.timestamp
             entry_rules = dict(rules_result.summary)
             position_units = units
+
+            # Initialize Trailing Stop (only if enabled)
+            if use_trailing_stop:
+                trailing_stop_price = position_cutloss
+                trailing_stop_activated = False
+                next_sl = position_cutloss  # Initialize next_sl for lagging indicator pattern
+
+                # Try to find wave structure for this entry (use open_time, not index)
+                entry_open_time = int(ltf_row["open_time"])
+                wave = _trace_wave_for_entry(decorated_ltf, entry_open_time)
+                if wave:
+                    # Calculate Fibonacci 100% Extension = Swing Low 2 + (Swing High - Swing Low 1)
+                    swing_low_1 = wave.get("swing_low_1", {})
+                    swing_high = wave.get("swing_high", {})
+                    swing_low_2 = wave.get("swing_low_2", {})
+
+                    wave1_range = swing_high.get("price", 0) - swing_low_1.get("price", 0)
+                    projection_base = swing_low_2.get("price", 0)
+                    trailing_stop_activation_price = projection_base + wave1_range  # 100% Extension
+
+                    print(f"[BACKTEST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (Fib 100% Extension)")
+                else:
+                    # Fallback: Use 7.5% profit as activation
+                    trailing_stop_activation_price = entry_price * 1.075
+                    print(f"[BACKTEST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (7.5% fallback - no wave)")
+
+                prev_high = candle.high
             continue
 
         # Historical path mirrors chart fallback when lower-TF data is missing
@@ -421,6 +466,33 @@ def _run_backtest(
                 entry_time = candle.timestamp
                 entry_rules = dict(rules_result.summary)
                 position_units = units
+
+                # Initialize Trailing Stop (only if enabled)
+                if use_trailing_stop:
+                    trailing_stop_price = position_cutloss
+                    trailing_stop_activated = False
+                    next_sl = position_cutloss  # Initialize next_sl for lagging indicator pattern
+
+                    # Trace wave structure from this entry point
+                    entry_open_time_ms = int(ltf_row["open_time"])
+                    wave = _trace_wave_for_entry(decorated_ltf, entry_open_time_ms)
+                    if wave:
+                        # Calculate Fibonacci 100% Extension = Swing Low 2 + (Swing High - Swing Low 1)
+                        swing_low_1 = wave.get("swing_low_1", {})
+                        swing_high = wave.get("swing_high", {})
+                        swing_low_2 = wave.get("swing_low_2", {})
+
+                        wave1_range = swing_high.get("price", 0) - swing_low_1.get("price", 0)
+                        projection_base = swing_low_2.get("price", 0)
+                        trailing_stop_activation_price = projection_base + wave1_range  # 100% Extension
+
+                        print(f"[BACKTEST PATH2] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (Fib 100% Extension from traced wave)")
+                    else:
+                        # Fallback: Use 7.5% profit as activation
+                        trailing_stop_activation_price = entry_price * 1.075
+                        print(f"[BACKTEST PATH2] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (7.5% fallback - no wave)")
+
+                    prev_high = candle.high
                 continue
 
             htf_row = _find_candle_at_or_before(decorated_htf, int(ltf_row["open_time"]))
@@ -444,6 +516,170 @@ def _run_backtest(
 
                 in_position = True
                 position_units = units
+
+                # Initialize Trailing Stop
+                trailing_stop_price = position_cutloss
+                trailing_stop_activated = False
+                next_sl = position_cutloss  # Initialize next_sl for lagging indicator pattern
+
+                # Trace wave structure from this entry point
+                entry_open_time_ms = int(ltf_row["open_time"])
+                wave = _trace_wave_for_entry(decorated_ltf, entry_open_time_ms)
+                if wave:
+                    # Calculate Fibonacci 100% Extension = Swing Low 2 + (Swing High - Swing Low 1)
+                    swing_low_1 = wave.get("swing_low_1", {})
+                    swing_high = wave.get("swing_high", {})
+                    swing_low_2 = wave.get("swing_low_2", {})
+
+                    wave1_range = swing_high.get("price", 0) - swing_low_1.get("price", 0)
+                    projection_base = swing_low_2.get("price", 0)
+                    trailing_stop_activation_price = projection_base + wave1_range  # 100% Extension
+
+                    print(f"[BACKTEST PATH2-HIST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (Fib 100% Extension from traced wave)")
+                else:
+                    # Fallback: Use 7.5% profit as activation
+                    trailing_stop_activation_price = entry_price * 1.075
+                    print(f"[BACKTEST PATH2-HIST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (7.5% fallback - no wave)")
+
+                prev_high = candle.high
+
+        # Update Trailing Stop while in position (only if enabled)
+        if in_position and use_trailing_stop and trailing_stop_price is not None:
+            current_high = candle.high
+            current_low = candle.low
+
+            # Check if bullish trend ended (EMA crossover from Bull to Bear)
+            # This MUST be checked BEFORE activation and BEFORE stop update
+            # When trend reverses, exit immediately at close price (like in app.js)
+            ema_fast = ltf_row.get("ema_fast", 0.0)
+            ema_slow = ltf_row.get("ema_slow", 0.0)
+            is_bullish = ema_fast > ema_slow
+
+            if not is_bullish:
+                # Bullish trend ended, exit immediately
+                exit_price = ltf_row["close"]
+                exit_time = candle.timestamp
+                exit_reason = "EMA_CROSSOVER_BEARISH"
+                print(f"[BACKTEST] Bullish trend ENDED at {candle.timestamp}: EMA crossover to Bearish (Fast={ema_fast:.2f} < Slow={ema_slow:.2f}), Exit at Close={exit_price:.2f}")
+
+                pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+                pnl_amount = position_capital * (pnl_pct / 100)
+                duration_days = (exit_time - entry_time).total_seconds() / 86400 if entry_time else 0.0
+                equity_value = equity * initial_capital + pnl_amount
+                equity = equity_value / initial_capital
+
+                trades.append(
+                    {
+                        "entry_time": entry_time.isoformat() if entry_time else "",
+                        "entry_price": round(entry_price, 4),
+                        "exit_time": exit_time.isoformat(),
+                        "exit_price": round(exit_price, 4),
+                        "pnl_pct": round(pnl_pct, 3),
+                        "invested_amount": round(position_capital, 2),
+                        "position_units": round(position_units, 6),
+                        "pnl_amount": round(pnl_amount, 2),
+                        "cutloss_price": round(position_cutloss, 4) if position_cutloss is not None else None,
+                        "duration_days": round(duration_days, 2),
+                        "ltf_color_at_entry": ltf_slice[-1].cdc_color.value if ltf_slice else "unknown",
+                        "ltf_color_at_exit": ltf_row.get("cdc_color", "none"),
+                        "rules": entry_rules or {},
+                        "exit_reason": exit_reason,
+                    }
+                )
+
+                in_position = False
+                entry_price = 0.0
+                entry_time = None
+                entry_rules = None
+                exit_reason = None
+                position_capital = 0.0
+                position_cutloss = None
+                position_units = 0.0
+                trailing_stop_price = None
+                trailing_stop_activated = False
+                trailing_stop_activation_price = None
+                prev_high = 0.0
+                next_sl = None  # Reset lagging indicator
+                continue
+
+            # IMPORTANT: Check exit FIRST (before updating stop) to use PREVIOUS candle's SL
+            # This matches app.js logic: currentSL = nextSL (from previous candle)
+            # Use next_sl from previous iteration, not trailing_stop_price which may have just been updated
+            current_sl = next_sl if next_sl is not None else trailing_stop_price
+            if trailing_stop_activated and current_low <= current_sl:
+                exit_price = current_sl  # Exit at the SL from PREVIOUS candle
+                exit_time = candle.timestamp
+                exit_reason = "TRAILING_STOP"
+                print(f"[BACKTEST] Trailing Stop HIT at {candle.timestamp}: Low={current_low:.2f} <= Stop={current_sl:.2f}")
+
+                pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+                pnl_amount = position_capital * (pnl_pct / 100)
+                duration_days = (exit_time - entry_time).total_seconds() / 86400 if entry_time else 0.0
+                equity_value = equity * initial_capital + pnl_amount
+                equity = equity_value / initial_capital
+
+                trades.append(
+                    {
+                        "entry_time": entry_time.isoformat() if entry_time else "",
+                        "entry_price": round(entry_price, 4),
+                        "exit_time": exit_time.isoformat(),
+                        "exit_price": round(exit_price, 4),
+                        "pnl_pct": round(pnl_pct, 3),
+                        "invested_amount": round(position_capital, 2),
+                        "position_units": round(position_units, 6),
+                        "pnl_amount": round(pnl_amount, 2),
+                        "cutloss_price": round(position_cutloss, 4) if position_cutloss is not None else None,
+                        "duration_days": round(duration_days, 2),
+                        "ltf_color_at_entry": ltf_slice[-1].cdc_color.value if ltf_slice else "unknown",
+                        "ltf_color_at_exit": ltf_row.get("cdc_color", "none"),
+                        "rules": entry_rules or {},
+                        "exit_reason": exit_reason,
+                    }
+                )
+
+                in_position = False
+                entry_price = 0.0
+                entry_time = None
+                entry_rules = None
+                exit_reason = None
+                position_capital = 0.0
+                position_cutloss = None
+                position_units = 0.0
+                trailing_stop_price = None
+                trailing_stop_activated = False
+                trailing_stop_activation_price = None
+                prev_high = 0.0
+                next_sl = None  # Reset lagging indicator
+                continue
+
+            # After checking exit, NOW check activation and update SL for NEXT candle
+            # Check if we should activate trailing stop (entire candle above 105% of activation)
+            if not trailing_stop_activated and trailing_stop_activation_price:
+                activation_threshold = trailing_stop_activation_price * 1.05  # 105%
+                if current_low >= activation_threshold:
+                    trailing_stop_activated = True
+                    print(f"[BACKTEST] Trailing Stop ACTIVATED at {candle.timestamp}: Low={current_low:.2f} >= Threshold={activation_threshold:.2f}")
+
+            # Update trailing stop if price makes new high
+            # ALWAYS calculate (like in app.js), not just when activated
+            # The activation flag only controls whether we EXIT, not whether we calculate
+            if current_high > prev_high:
+                # New high achieved! Calculate incremental gain
+                incremental_gain = current_high - prev_high
+                new_stop = next_sl + incremental_gain  # Calculate from next_sl, not trailing_stop_price
+
+                # Trailing Stop can only rise, never fall
+                if new_stop > next_sl:
+                    old_stop = next_sl
+                    next_sl = new_stop  # Update next_sl to be used in NEXT candle
+                    trailing_stop_price = new_stop  # Also update trailing_stop_price for backward compatibility
+                    if trailing_stop_activated:
+                        print(f"[BACKTEST] Trailing Stop updated: {old_stop:.2f} -> {new_stop:.2f} (High: {current_high:.2f}) [will be used in NEXT candle]")
+                    else:
+                        print(f"[BACKTEST] Trailing Stop updated (pre-activation): {old_stop:.2f} -> {new_stop:.2f} (High: {current_high:.2f}) [will be used in NEXT candle]")
+
+                # Update prev_high for next comparison
+                prev_high = current_high
 
         # Exit check: orange → red, close on lower TF (or LTF for historical)
         if (
@@ -504,6 +740,10 @@ def _run_backtest(
             position_capital = 0.0
             position_cutloss = None
             position_units = 0.0
+            trailing_stop_price = None
+            trailing_stop_activated = False
+            trailing_stop_activation_price = None
+            prev_high = 0.0
             continue
 
         # Strong_Sell special signal exit (RSI divergence + orange zone)
@@ -547,6 +787,10 @@ def _run_backtest(
             position_capital = 0.0
             position_cutloss = None
             position_units = 0.0
+            trailing_stop_price = None
+            trailing_stop_activated = False
+            trailing_stop_activation_price = None
+            prev_high = 0.0
 
     if in_position and entry_time is not None:
         if lower_tf_candles:
@@ -656,6 +900,7 @@ async def run_backtest(
     htf_timeframe: Optional[str] = Query(None, description="Override higher timeframe (defaults to mapping)"),
     limit: int = Query(240, ge=50, le=1000),
     initial_capital: float = Query(10000.0, ge=0, description="เงินต้น (หน่วยเดียวกับ quote currency)"),
+    use_trailing_stop: bool = Query(True, description="Enable Trailing Stop (True) or use Strong Sell only (False)"),
 ) -> Dict[str, Any]:
     """
     Run a lightweight backtest using Binance candles and the CDC rule engine.
@@ -694,6 +939,12 @@ async def run_backtest(
     rsi_values = _compute_rsi([row["close"] for row in ltf_rows])
     strong_states = _detect_strong_signals(decorated_ltf, rsi_values)
 
+    # Get Elliott Wave analysis for Fibonacci activation prices
+    # Need to pass decorated_ltf (with EMA data) instead of raw ltf_rows
+    fib_analysis = get_fibonacci_analysis(decorated_ltf)
+    wave_structures = fib_analysis.get("waves", [])
+    print(f"[BACKTEST] Fibonacci analysis found {len(wave_structures)} wave structures")
+
     if not candles_ltf or not candles_htf:
         raise HTTPException(status_code=400, detail="Not enough candle data to run backtest")
 
@@ -710,6 +961,8 @@ async def run_backtest(
         enable_leading_signal=cfg.enable_leading_signal,
         initial_capital=initial_capital,
         per_trade_cap_pct=cfg.risk.per_trade_cap_pct,
+        use_trailing_stop=use_trailing_stop,
+        wave_structures=wave_structures,
     )
 
     return {

@@ -79,6 +79,130 @@ def calculate_projection_levels(low1: float, high: float, low2: float) -> List[F
     return levels
 
 
+def calculate_trailing_stop(
+    candles: List[Dict],
+    entry_index: int,
+    entry_price: float,
+    initial_stop_price: float,
+    activation_price: Optional[float] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Calculate Trailing Stop Loss with activation trigger.
+
+    Logic:
+    - Trailing Stop ONLY activates when price reaches activation_price (e.g., 100% Fib Extension)
+    - Before activation: Use fixed initial SL
+    - After activation: Trailing SL follows price incremental gains
+    - Exit when price Low touches current Trailing Stop
+
+    Parameters:
+    - activation_price: Price level to activate trailing stop (default: None = activate immediately)
+
+    Example with Wave Pattern:
+    - Entry: 40,000 (Green Dot)
+    - Initial SL: 39,000 (Swing Low 2 Low)
+    - Activation Price: 50,000 (100% Extension = Swing High)
+    - Target: 72,360 (161.8% Extension)
+
+    Flow:
+    1. Price 40k → 49k: Use fixed SL 39,000 (not activated yet)
+    2. Price hits 50k: Trailing Stop ACTIVATES, SL = 49,000
+    3. Price 51k: SL = 50,000 (follows price)
+    4. Exit when Low touches current SL
+
+    Returns:
+    - trailing_stops: List of SL updates [{index, price, timestamp}]
+    - exit_point: {index, price, timestamp} where price hit SL
+    - final_sl: Last SL price before exit
+    - activation_point: {index, price} where trailing stop activated (or None)
+    """
+    if entry_index >= len(candles) - 1:
+        return None
+
+    trailing_stops = []
+    current_sl = initial_stop_price
+    exit_point = None
+    activation_point = None
+    is_activated = False  # Track if trailing stop has been activated
+
+    # Track previous candle's average for calculating NEXT candle's SL
+    prev_avg = entry_price
+    next_sl = initial_stop_price  # SL to be used in NEXT candle
+
+    # Start from the candle AFTER entry
+    for i in range(entry_index + 1, len(candles)):
+        candle = candles[i]
+        candle_high = candle["high"]
+        candle_low = candle["low"]
+        candle_close = candle["close"]
+
+        # IMPORTANT: Use SL calculated from PREVIOUS candle
+        # This candle uses next_sl (which was calculated in previous iteration)
+        current_sl = next_sl
+
+        # Check if price hit stop loss FIRST (using SL from previous candle)
+        if candle_low <= current_sl:
+            exit_point = {
+                "index": i,
+                "price": round(current_sl, 4),  # Sell at SL price
+                "timestamp": str(candle.get("timestamp")) if candle.get("timestamp") else None,
+                "open_time": candle.get("open_time"),
+            }
+            break
+
+        # Check if we should activate trailing stop
+        if not is_activated and activation_price is not None:
+            # Trailing stop not yet activated
+            # Check if price reached activation level
+            if candle_high >= activation_price:
+                is_activated = True
+                activation_point = {
+                    "index": i,
+                    "price": round(activation_price, 4),
+                    "timestamp": str(candle.get("timestamp")) if candle.get("timestamp") else None,
+                    "open_time": candle.get("open_time"),
+                }
+                # Set prev_avg to activation price to start tracking from here
+                prev_avg = activation_price
+                print(f"🎯 Trailing Stop ACTIVATED at candle {i}: Price reached {activation_price:.2f}")
+
+        # After checking exit, NOW calculate SL for NEXT candle
+        # Calculate current candle's average price (HL/2)
+        candle_avg = (candle_high + candle_low) / 2.0
+
+        # Only update SL if trailing stop is activated (or no activation price set)
+        if is_activated or activation_price is None:
+            # Calculate the INCREMENTAL gain from previous candle
+            incremental_gain = candle_avg - prev_avg
+
+            # Only update SL if there's a positive incremental gain
+            if incremental_gain > 0:
+                new_sl = next_sl + incremental_gain
+
+                # Trailing Stop can only rise, never fall
+                if new_sl > next_sl:
+                    next_sl = new_sl
+                    trailing_stops.append({
+                        "index": i + 1,  # This SL will be used in NEXT candle
+                        "price": round(next_sl, 4),
+                        "timestamp": str(candle.get("timestamp")) if candle.get("timestamp") else None,
+                        "open_time": candle.get("open_time"),
+                    })
+
+        # Update prev_avg for next iteration
+        prev_avg = candle_avg
+
+    return {
+        "initial_sl": round(initial_stop_price, 4),
+        "trailing_stops": trailing_stops,  # All SL updates
+        "exit_point": exit_point,          # Where we sold (or None if still holding)
+        "final_sl": round(next_sl, 4),     # Last calculated SL (for next candle if still active)
+        "is_active": exit_point is None,   # True if position still open
+        "activation_point": activation_point,  # Where trailing stop activated (or None)
+        "activation_price": activation_price,  # Price level that triggers trailing stop
+    }
+
+
 def find_all_wave_patterns(candles: List[Dict], lookback: int = 10) -> List[WavePattern]:
     """
     Find all Bull and Bear zones > 7 days with their extreme points.
@@ -400,6 +524,151 @@ def get_fibonacci_analysis(candles: List[Dict]) -> Dict[str, Any]:
             for lvl in levels
         ]
 
+        # Calculate Trailing Stop Loss for Bear waves (Projection patterns)
+        # Entry point: swing_low_2 (Green dot - after price confirms pattern)
+        # Entry price: candle close at swing_low_2
+        # Initial SL: swing_low_2.price (Low before entry)
+        # Activation: 100% Extension = Swing Low 2 + (Swing High - Swing Low 1)
+        if "bear" in wave.wave_id:
+            entry_candle = candles[wave.swing_low_2.index]
+
+            # Calculate 100% Fibonacci Extension
+            # Formula: Swing Low 2 + (Swing High - Swing Low 1)
+            wave1_range = wave.swing_high.price - wave.swing_low_1.price
+            activation_price_100_pct = wave.swing_low_2.price + wave1_range
+
+            trailing_stop_data = calculate_trailing_stop(
+                candles=candles,
+                entry_index=wave.swing_low_2.index,
+                entry_price=entry_candle["close"],
+                initial_stop_price=wave.swing_low_2.price,
+                activation_price=activation_price_100_pct  # Activate at 100% Extension
+            )
+            if trailing_stop_data:
+                wave_data["trailing_stop"] = trailing_stop_data
+                activation_status = "✅ ACTIVATED" if trailing_stop_data.get("activation_point") else "⏳ PENDING"
+                print(f"📈 Trailing Stop for {wave.wave_id}: Entry[{wave.swing_low_2.index}] @{entry_candle['close']:.2f} | Initial SL: {trailing_stop_data['initial_sl']} → Final SL: {trailing_stop_data['final_sl']} | Activation @{activation_price_100_pct:.2f} {activation_status} | Active: {trailing_stop_data['is_active']}")
+
         result["waves"].append(wave_data)
 
     return result
+
+
+def trace_wave_from_entry(candles: List[Dict], entry_timestamp_ms: int) -> Optional[Dict]:
+    """
+    Trace Elliott Wave structure from entry point using EMA crossover zones.
+    This matches the frontend's traceWaveStructureFromBuyArrow() logic.
+
+    Pattern: Bearish(Blue) → Bullish(Orange) → Bearish(Green) → Bullish(BUY)
+
+    Logic:
+    1. BUY is in Bullish zone → Skip entire Bullish zone
+    2. Find Bearish zone before → Swing Low 2 (Green) = lowest in entire zone
+    3. Find Bullish zone before → Swing High (Orange) = highest in entire zone
+    4. Find Bearish zone before → Swing Low 1 (Blue) = lowest in entire zone (must < Swing Low 2)
+
+    Args:
+        candles: List of candle data with ema_fast, ema_slow
+        entry_timestamp_ms: Entry timestamp in milliseconds
+
+    Returns:
+        Dict with swing_low_1, swing_high, swing_low_2, or None if pattern not found
+    """
+    # Find entry candle index
+    buy_index = -1
+    for i in range(len(candles) - 1, -1, -1):
+        if candles[i]["open_time"] <= entry_timestamp_ms:
+            buy_index = i
+            break
+
+    if buy_index < 10:
+        return None  # Not enough candles
+
+    def find_ema_zone_boundaries(start_index: int, is_bullish: bool) -> Optional[Dict]:
+        """Find EMA crossover zone boundaries."""
+        zone_end = -1
+
+        # Find first candle of this EMA trend
+        for i in range(start_index, -1, -1):
+            candle = candles[i]
+            is_bull_candle = candle.get("ema_fast", 0) > candle.get("ema_slow", 0)
+
+            if is_bull_candle == is_bullish:
+                zone_end = i
+                break
+
+        if zone_end == -1:
+            return None
+
+        # Find where zone ends (scan backwards until EMA crossover)
+        zone_start = zone_end
+        for i in range(zone_end, -1, -1):
+            candle = candles[i]
+            is_bull_candle = candle.get("ema_fast", 0) > candle.get("ema_slow", 0)
+
+            if is_bull_candle == is_bullish:
+                zone_start = i
+            else:
+                break  # EMA crossed over, exit zone
+
+        return {"start": zone_start, "end": zone_end}
+
+    # Step 1: Skip current Bullish zone (where BUY is)
+    bullish_zone_buy = find_ema_zone_boundaries(buy_index, True)
+    if not bullish_zone_buy:
+        return None
+
+    # Step 2: Find Bearish zone before → Swing Low 2
+    bearish_zone_2 = find_ema_zone_boundaries(bullish_zone_buy["start"] - 1, False)
+    if not bearish_zone_2:
+        return None
+
+    # Find LOWEST point in this Bearish zone
+    swing_low_2 = None
+    for i in range(bearish_zone_2["end"], bearish_zone_2["start"] - 1, -1):
+        if swing_low_2 is None or candles[i]["low"] < swing_low_2["price"]:
+            swing_low_2 = {
+                "index": i,
+                "price": candles[i]["low"],
+                "open_time": candles[i]["open_time"]
+            }
+
+    # Step 3: Find Bullish zone before → Swing High
+    bullish_zone = find_ema_zone_boundaries(bearish_zone_2["start"] - 1, True)
+    if not bullish_zone:
+        return None
+
+    # Find HIGHEST point in this Bullish zone
+    swing_high = None
+    for i in range(bullish_zone["end"], bullish_zone["start"] - 1, -1):
+        if swing_high is None or candles[i]["high"] > swing_high["price"]:
+            swing_high = {
+                "index": i,
+                "price": candles[i]["high"],
+                "open_time": candles[i]["open_time"]
+            }
+
+    # Step 4: Find Bearish zone before → Swing Low 1
+    bearish_zone_1 = find_ema_zone_boundaries(bullish_zone["start"] - 1, False)
+    if not bearish_zone_1:
+        return None
+
+    # Find LOWEST point in this Bearish zone
+    swing_low_1 = None
+    for i in range(bearish_zone_1["end"], bearish_zone_1["start"] - 1, -1):
+        if swing_low_1 is None or candles[i]["low"] < swing_low_1["price"]:
+            swing_low_1 = {
+                "index": i,
+                "price": candles[i]["low"],
+                "open_time": candles[i]["open_time"]
+            }
+
+    # Validate: Swing Low 1 must be lower than Swing Low 2
+    if swing_low_1["price"] >= swing_low_2["price"]:
+        return None
+
+    return {
+        "swing_low_1": swing_low_1,
+        "swing_high": swing_high,
+        "swing_low_2": swing_low_2
+    }

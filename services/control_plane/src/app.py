@@ -215,6 +215,7 @@ def build_chart_section() -> str:
       let divergenceLines = []; // Store divergence line series
       let detectedDivergences = []; // Store detected divergences for display
       let candleStates = []; // Store Strong_Buy/Strong_Sell states for each candle
+      let buyArrowMarkers = []; // Store BUY arrow positions for click detection
 
       // Store multi-timeframe data globally for tooltip access
       let data1w = null;
@@ -259,9 +260,9 @@ def build_chart_section() -> str:
       };
 
       const zoneFill = {
-        green: { top: 'rgba(34, 197, 94, 0.28)', bottom: 'rgba(34, 197, 94, 0)' },
-        red: { top: 'rgba(239, 68, 68, 0.28)', bottom: 'rgba(239, 68, 68, 0)' },
-        blue: { top: 'rgba(59, 130, 246, 0.16)', bottom: 'rgba(59, 130, 246, 0)' },
+        green: { top: 'rgba(34, 197, 94, 0.12)', bottom: 'rgba(34, 197, 94, 0)' },
+        red: { top: 'rgba(239, 68, 68, 0.12)', bottom: 'rgba(239, 68, 68, 0)' },
+        blue: { top: 'rgba(59, 130, 246, 0.08)', bottom: 'rgba(59, 130, 246, 0)' },
         lblue: { top: 'rgba(56, 189, 248, 0.16)', bottom: 'rgba(56, 189, 248, 0)' },
         orange: { top: 'rgba(249, 115, 22, 0.18)', bottom: 'rgba(249, 115, 22, 0)' },
         yellow: { top: 'rgba(234, 179, 8, 0.18)', bottom: 'rgba(234, 179, 8, 0)' },
@@ -1092,16 +1093,25 @@ def build_chart_section() -> str:
 
             // Store wave object for click handling
             // Bear wave: clickable at swing_low_1 (t1, p1) - blue dot (points to future)
+            //            AND at swing_low_2 (t3, p3) - green dot (entry point)
             // Bull wave: clickable at swing_high (t2, p2) - red dot
             waveObjects.push({
               waveId: wave.wave_id,
               isBearWave: isBearWave,
               fibLevels: wave.fib_levels || [],
+              trailingStop: wave.trailing_stop || null,  // Trailing Stop data from backend
               showingProjection: false,
               showingRetracement: false,
+              showingTrailingStop: false,  // New state for Trailing Stop visibility
+              showingWaveStructure: false,  // New state for showing Wave reference structure
               points: { t1, p1, t2, p2, t3, p3 },
+              swing_low_1: wave.swing_low_1,  // Store full swing point data
+              swing_high: wave.swing_high,
+              swing_low_2: wave.swing_low_2,
               clickableTime: isBearWave ? t1 : t2,  // Blue dot at t1 for bear, red dot at t2 for bull
               clickablePrice: isBearWave ? p1 : p2,
+              entryTime: t3,  // Green dot (entry point) for bear waves
+              entryPrice: p3,
             });
 
             console.log(`✅ Drew Elliott Wave ${wave.wave_id}`);
@@ -1238,8 +1248,9 @@ def build_chart_section() -> str:
 
       function handleWaveClick(event) {
         // Click handler:
-        // - Click on Wave 1 Low (blue dot) → Show Projection (bullish targets)
-        // - Click on Wave 1 High (red dot) → Show Retracement (bearish levels)
+        // - Click on Wave 1 Low (blue dot) → Toggle Fibonacci Projection
+        // - Click on Wave 1 High (red dot) → Toggle Fibonacci Retracement
+        // - Click on BUY arrow (Strong Buy signal) → Toggle Trailing Stop
         const rect = chartContainer.getBoundingClientRect();
         const x = event.clientX - rect.left;
 
@@ -1248,12 +1259,13 @@ def build_chart_section() -> str:
         const CLICK_THRESHOLD = 40; // pixels
         const timeScale = tvChart.timeScale();
 
-        // Check all three points for each wave: Low, High, Wave2Low
+        // Check wave points and BUY arrows
         let closestMatch = null;
         let minDistance = Infinity;
 
+        // 1. Check wave swing points (Blue/Red dots only - Green dots not clickable)
         waveObjects.forEach((wave, idx) => {
-          // Check clickable point (blue for bear, red for bull)
+          // Check blue/red clickable point (swing_low_1 for bear, swing_high for bull)
           const clickCoord = timeScale.timeToCoordinate(wave.clickableTime);
           if (clickCoord !== null) {
             const dx = Math.abs(x - clickCoord);
@@ -1262,29 +1274,220 @@ def build_chart_section() -> str:
               closestMatch = { waveIndex: idx, pointType: wave.isBearWave ? 'low' : 'high' };
             }
           }
+
+          // Green dots (entry point at swing_low_2) are NOT clickable
+          // Only BUY arrows should trigger wave structure display
+        });
+
+        // 2. Check BUY arrow markers (Strong Buy signals)
+        buyArrowMarkers.forEach((arrow, arrowIdx) => {
+          const arrowCoord = timeScale.timeToCoordinate(arrow.time);
+          if (arrowCoord !== null) {
+            const dx = Math.abs(x - arrowCoord);
+            if (dx < minDistance && dx < CLICK_THRESHOLD) {
+              minDistance = dx;
+              closestMatch = { arrowIndex: arrowIdx, pointType: 'buy_arrow' };
+            }
+          }
         });
 
         if (closestMatch) {
-          const wave = waveObjects[closestMatch.waveIndex];
-          console.log(`✅ Clicked on ${wave.waveId} ${closestMatch.pointType}, distance: ${minDistance.toFixed(2)}px`);
+          if (closestMatch.pointType === 'buy_arrow') {
+            // Clicked on BUY arrow → Trace Wave Structure backwards and show it
+            const arrow = buyArrowMarkers[closestMatch.arrowIndex];
+            console.log(`✅ Clicked on BUY arrow at time ${arrow.time}, distance: ${minDistance.toFixed(2)}px`);
+            console.log(`   Arrow data:`, arrow);
 
-          // Close all other waves first
-          waveObjects.forEach((w, idx) => {
-            if (idx !== closestMatch.waveIndex) {
-              hideWaveFibonacci(idx);
+            // Check if clicking the same arrow again (toggle off)
+            if (window.activeTracedArrowTime === arrow.time) {
+              console.log(`ℹ️ Clicking same arrow again - hiding traced wave`);
+
+              // Hide traced wave
+              if (window.tracedWaveSeries) {
+                window.tracedWaveSeries.forEach(series => tvChart.removeSeries(series));
+                window.tracedWaveSeries = [];
+              }
+              window.activeTracedArrowTime = null;
+              return;
             }
-          });
 
-          // Toggle this wave with the appropriate type
-          if (closestMatch.pointType === 'low') {
-            // Click on Low → Show Projection (or hide if already showing projection)
-            toggleWaveProjection(closestMatch.waveIndex);
-          } else if (closestMatch.pointType === 'high') {
-            // Click on High → Show Retracement (or hide if already showing retracement)
-            toggleWaveRetracement(closestMatch.waveIndex);
+            // Trace Wave structure from BUY arrow
+            const waveStructure = traceWaveStructureFromBuyArrow(arrow);
+
+            if (waveStructure) {
+              // Successfully traced Wave structure
+              console.log(`✅ Traced Wave structure:`, waveStructure);
+
+              // Hide all existing visualizations first
+              waveObjects.forEach((w, idx) => {
+                hideWaveFibonacci(idx);
+              });
+
+              // Clear any previous traced wave (when clicking different arrow)
+              if (window.tracedWaveSeries) {
+                window.tracedWaveSeries.forEach(series => tvChart.removeSeries(series));
+                window.tracedWaveSeries = [];
+              }
+
+              window.tracedWaveSeries = [];
+              window.activeTracedArrowTime = arrow.time; // Remember which arrow is active
+
+              // Draw the traced Wave structure
+              // 1. Highlight the three reference points (Blue → Orange → Green)
+              const points = [
+                { ...waveStructure.swingLow1, color: '#2563eb', label: 'Swing Low 1' },  // Blue
+                { ...waveStructure.swingHigh, color: '#f97316', label: 'Swing High' },   // Orange
+                { ...waveStructure.swingLow2, color: '#10b981', label: 'Entry (Swing Low 2)' }  // Green
+              ];
+
+              points.forEach((point, idx) => {
+                const highlightSeries = tvChart.addLineSeries({
+                  color: point.color,
+                  lineWidth: 0,
+                  pointMarkersVisible: true,
+                  pointMarkersRadius: 8,
+                  title: point.label,
+                  priceLineVisible: false,
+                  lastValueVisible: false,
+                  crosshairMarkerVisible: true,
+                });
+                highlightSeries.setData([{ time: point.time, value: point.price }]);
+                window.tracedWaveSeries.push(highlightSeries);
+              });
+
+              // 2. Draw connecting lines
+              const connectingLine = tvChart.addLineSeries({
+                color: '#fbbf24',
+                lineWidth: 3,
+                lineStyle: 1,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                crosshairMarkerVisible: false,
+                title: 'Wave Structure',
+              });
+              connectingLine.setData([
+                { time: waveStructure.swingLow1.time, value: waveStructure.swingLow1.price },
+                { time: waveStructure.swingHigh.time, value: waveStructure.swingHigh.price },
+                { time: waveStructure.swingLow2.time, value: waveStructure.swingLow2.price },
+              ]);
+              window.tracedWaveSeries.push(connectingLine);
+
+              // 3. Show Fibonacci levels (100% = Activation, 161.8% = Target)
+              const wave1Range = waveStructure.swingHigh.price - waveStructure.swingLow1.price;
+              const projectionBase = waveStructure.swingLow2.price;
+
+              const keyLevels = [
+                { ratio: 1.000, label: '100% (Activation)', price: projectionBase + wave1Range, color: '#15803d' },
+                { ratio: 1.618, label: '161.8% (Target)', price: projectionBase + (wave1Range * 1.618), color: '#fbbf24' }
+              ];
+
+              keyLevels.forEach(level => {
+                const fibLine = tvChart.addLineSeries({
+                  color: level.color,
+                  lineWidth: 4,
+                  lineStyle: level.ratio === 1.618 ? 0 : 2,
+                  priceLineVisible: false,
+                  lastValueVisible: true,
+                  crosshairMarkerVisible: false,
+                  title: level.label,
+                });
+
+                const now = Math.floor(Date.now() / 1000);
+                fibLine.setData([
+                  { time: now - (10 * 365 * 24 * 60 * 60), value: level.price },
+                  { time: now + (2 * 365 * 24 * 60 * 60), value: level.price }
+                ]);
+                window.tracedWaveSeries.push(fibLine);
+              });
+
+              // 4. Draw Trailing Stop
+              const entryTime = waveStructure.buyPoint.time;
+              const entryPrice = waveStructure.buyPoint.price;
+              const initialSL = waveStructure.swingLow2.price;
+              const activationPrice = projectionBase + wave1Range; // 100% Extension
+
+              const ts = calculateTrailingStopFromEntry(entryTime, entryPrice, initialSL, activationPrice);
+
+              if (ts) {
+                console.log(`📈 Calculated Trailing Stop:`, ts);
+                drawTracedTrailingStop(ts, entryTime);
+              }
+
+              console.log(`✅ Displayed traced Wave structure from BUY arrow`);
+            } else {
+              // No valid Elliott Wave structure found
+              console.warn('⚠️ Could not trace valid Wave structure from BUY arrow');
+              console.log('📊 Using fallback: 7.5% profit activation for Trailing Stop');
+
+              // Clear any previous traced wave
+              if (window.tracedWaveSeries) {
+                window.tracedWaveSeries.forEach(series => tvChart.removeSeries(series));
+                window.tracedWaveSeries = [];
+              }
+
+              window.tracedWaveSeries = [];
+
+              // Calculate Trailing Stop with 7.5% profit activation
+              const entryTime = Math.floor(arrow.timestamp / 1000);
+              const entryPrice = arrow.price;
+              const initialSL = arrow.cutloss || entryPrice * 0.95; // Use cutloss or 5% below entry
+              const activationPrice = entryPrice * 1.075; // 7.5% profit
+
+              console.log(`📍 Entry: ${entryPrice}, Initial SL: ${initialSL}, Activation: ${activationPrice} (7.5% profit)`);
+
+              // Show activation line
+              const activationLine = tvChart.addLineSeries({
+                color: '#fb923c',  // Orange
+                lineWidth: 3,
+                lineStyle: 2,  // Dashed
+                priceLineVisible: false,
+                lastValueVisible: true,
+                crosshairMarkerVisible: false,
+                title: 'Activation (7.5% Profit)',
+              });
+
+              const now = Math.floor(Date.now() / 1000);
+              activationLine.setData([
+                { time: now - (10 * 365 * 24 * 60 * 60), value: activationPrice },
+                { time: now + (2 * 365 * 24 * 60 * 60), value: activationPrice }
+              ]);
+              window.tracedWaveSeries.push(activationLine);
+
+              // Calculate and draw Trailing Stop
+              const ts = calculateTrailingStopFromEntry(entryTime, entryPrice, initialSL, activationPrice);
+
+              if (ts) {
+                console.log(`📈 Calculated Trailing Stop (no Wave):`, ts);
+                drawTracedTrailingStop(ts, entryTime);
+              }
+
+              console.log(`✅ Displayed Trailing Stop for non-Wave signal`);
+            }
+
+          } else {
+            // Clicked on wave point (Blue/Red dot - NOT Green)
+            const wave = waveObjects[closestMatch.waveIndex];
+            console.log(`✅ Clicked on ${wave.waveId} ${closestMatch.pointType}, distance: ${minDistance.toFixed(2)}px`);
+
+            // Close all other waves first
+            waveObjects.forEach((w, idx) => {
+              if (idx !== closestMatch.waveIndex) {
+                hideWaveFibonacci(idx);
+              }
+            });
+
+            // Toggle based on which point was clicked
+            if (closestMatch.pointType === 'low') {
+              // Click on Blue dot (swing_low_1) → Toggle Fibonacci Projection
+              toggleWaveProjection(closestMatch.waveIndex);
+            } else if (closestMatch.pointType === 'high') {
+              // Click on Red dot (swing_high) → Toggle Fibonacci Retracement
+              toggleWaveRetracement(closestMatch.waveIndex);
+            }
+            // Green dots (entry) are NOT clickable - removed 'entry' handler
           }
         } else {
-          console.log('No wave point close enough to click (threshold: ' + CLICK_THRESHOLD + 'px)');
+          console.log('No wave point or BUY arrow close enough to click (threshold: ' + CLICK_THRESHOLD + 'px)');
         }
       }
 
@@ -1308,6 +1511,18 @@ def build_chart_section() -> str:
           wave.referenceSeries = [];
         }
 
+        // Hide Wave Structure
+        if (wave.waveStructureSeries) {
+          wave.waveStructureSeries.forEach(series => tvChart.removeSeries(series));
+          wave.waveStructureSeries = [];
+        }
+
+        // Hide Trailing Stop
+        if (wave.trailingStopSeries) {
+          wave.trailingStopSeries.forEach(series => tvChart.removeSeries(series));
+          wave.trailingStopSeries = [];
+        }
+
         // Hide highlights (deprecated)
         if (wave.lowHighlightSeries) {
           wave.lowHighlightSeries.applyOptions({ pointMarkersVisible: false });
@@ -1318,25 +1533,37 @@ def build_chart_section() -> str:
 
         wave.showingProjection = false;
         wave.showingRetracement = false;
+        wave.showingTrailingStop = false;
+        wave.showingWaveStructure = false;
+      }
+
+      function toggleTrailingStop(waveIndex, arrowData = null) {
+        const wave = waveObjects[waveIndex];
+        if (!wave || !wave.isBearWave) return;
+
+        // Toggle Trailing Stop visibility
+        if (wave.showingTrailingStop) {
+          // Hide Trailing Stop
+          if (wave.trailingStopSeries) {
+            wave.trailingStopSeries.forEach(series => tvChart.removeSeries(series));
+            wave.trailingStopSeries = [];
+          }
+          wave.showingTrailingStop = false;
+          console.log(`ℹ️ Hid Trailing Stop for ${wave.waveId}`);
+        } else {
+          // Show Trailing Stop (pass arrowData if provided)
+          drawTrailingStop(waveIndex, arrowData);
+        }
       }
 
       function toggleWaveProjection(waveIndex) {
         const wave = waveObjects[waveIndex];
         if (!wave) return;
 
-        // Toggle projection
+        // Simple Toggle for Fibonacci Projection
         if (wave.showingProjection) {
-          // Hide projection
-          if (wave.projectionSeries) {
-            wave.projectionSeries.forEach(series => tvChart.removeSeries(series));
-            wave.projectionSeries = [];
-          }
-          // Hide highlight
-          if (wave.lowHighlightSeries) {
-            wave.lowHighlightSeries.applyOptions({ pointMarkersVisible: false });
-          }
-          wave.showingProjection = false;
-          console.log(`ℹ️ Hid Projection for ${wave.waveId}`);
+          // Hide Fibonacci Projection
+          hideWaveFibonacci(waveIndex);
         } else {
           // Show projection (reduced levels: 38.2%, 61.8%, 100%, 161.8%, 261.8%)
           // IMPORTANT: Projection base is p3 (green dot - swing_low_2)
@@ -1426,6 +1653,483 @@ def build_chart_section() -> str:
         }
       }
 
+      // Calculate Trailing Stop from BUY arrow entry point
+      function calculateTrailingStopFromEntry(entryTime, entryPrice, initialSL, activationPrice = null) {
+        // Use data1d.candles (which has all 1D candles from backend)
+        const candles1d = data1d?.candles || [];
+
+        console.log(`🔍 Looking for entry candle at time: ${entryTime}, entry price: ${entryPrice}, initial SL: ${initialSL}`);
+        console.log(`   data1d has ${candles1d.length} candles`);
+
+        if (candles1d.length === 0) {
+          console.warn('⚠️ No 1D candle data available');
+          return null;
+        }
+
+        // Find entry candle index in 1D candles
+        // entryTime is in seconds, candle.open_time is in milliseconds
+        const entryMs = entryTime * 1000;
+        let entryIndex = -1;
+
+        // Try exact match first
+        for (let i = 0; i < candles1d.length; i++) {
+          if (candles1d[i].open_time === entryMs) {
+            entryIndex = i;
+            console.log(`✅ Found entry candle at index ${i} (exact match)`);
+            break;
+          }
+        }
+
+        // If exact match fails, find nearest candle (within 1 day tolerance)
+        if (entryIndex === -1) {
+          console.warn('⚠️ No exact match found, searching for nearest candle...');
+          let minDiff = Infinity;
+          for (let i = 0; i < candles1d.length; i++) {
+            const diff = Math.abs(candles1d[i].open_time - entryMs);
+            if (diff < minDiff && diff < 86400000) { // Within 1 day (24h in ms)
+              minDiff = diff;
+              entryIndex = i;
+            }
+          }
+
+          if (entryIndex !== -1) {
+            console.log(`✅ Found nearest entry candle at index ${entryIndex} (${minDiff}ms difference)`);
+            console.log(`   Looking for: ${new Date(entryMs).toISOString()}`);
+            console.log(`   Found: ${new Date(candles1d[entryIndex].open_time).toISOString()}`);
+          } else {
+            console.warn('⚠️ Entry candle not found');
+            console.warn('   Searching for time:', entryTime, '(', new Date(entryMs).toISOString(), ')');
+            console.warn('   Sample 1D candle times:', candles1d.slice(Math.max(0, candles1d.length - 3)).map(c => ({
+              open_time: c.open_time,
+              date: new Date(c.open_time).toISOString()
+            })));
+            return null;
+          }
+        }
+
+        if (entryIndex >= candles1d.length - 1) {
+          console.warn('⚠️ No candles after entry');
+          return null;
+        }
+
+        const trailingStops = [];
+        let currentSL = initialSL;
+        let exitPoint = null;
+
+        console.log(`📊 Starting Trailing Stop calculation:`);
+        console.log(`   Entry Price: ${entryPrice}, Initial SL: ${initialSL}`);
+        if (activationPrice) {
+          console.log(`   Activation Price: ${activationPrice}`);
+        }
+
+        // Track previous candle's HIGH for calculating NEXT candle's SL
+        // Start from entry candle's high as the baseline
+        const entryCandle = candles1d[entryIndex];
+        let prevHigh = entryCandle ? entryCandle.high : entryPrice;
+        let nextSL = initialSL;  // SL to be used in NEXT candle
+        let isActivated = activationPrice ? false : true; // If no activation price, always active
+        let activationPoint = null;
+
+        // Scan each candle AFTER entry
+        for (let i = entryIndex + 1; i < candles1d.length; i++) {
+          const candle = candles1d[i];
+          const high = candle.high;
+          const low = candle.low;
+
+          // IMPORTANT: Use SL calculated from PREVIOUS candle
+          // This candle uses nextSL (which was calculated in previous iteration)
+          currentSL = nextSL;
+
+          // Check if price hit stop loss ONLY if activated
+          if (isActivated && low <= currentSL) {
+            exitPoint = {
+              time: Math.floor(candle.open_time / 1000),
+              price: currentSL,
+            };
+            console.log(`🛑 EXIT at candle ${i}: Low ${low} <= SL ${currentSL} (activated)`);
+            break;
+          }
+
+          // Check if bullish trend ended (EMA crossover from Bull to Bear)
+          // Stop calculating when EMA Fast crosses below EMA Slow
+          const isBullish = candle.ema_fast > candle.ema_slow;
+          if (!isBullish) {
+            // Bullish trend ended, stop calculating
+            console.log(`🛑 Bullish trend ENDED at candle ${i}: EMA crossover to Bearish`);
+            exitPoint = {
+              time: Math.floor(candle.open_time / 1000),
+              price: candle.close,  // Exit at close price when trend reverses
+            };
+            break;
+          }
+
+          // Check if we should activate trailing stop
+          // Activation occurs when ENTIRE candle (OHLC) is above activation price + 5% buffer
+          // This means even the LOW is 5% above activation - candle is clearly above the line
+          const activationThreshold = activationPrice * 1.05; // 105% of activation price
+          if (!isActivated && activationPrice && candle.low >= activationThreshold) {
+            isActivated = true;
+            activationPoint = {
+              time: Math.floor(candle.open_time / 1000),
+              price: activationPrice,
+            };
+            console.log(`🎯 Trailing Stop ACTIVATED at candle ${i}: Entire candle above 105% threshold (Low: ${candle.low} >= ${activationThreshold.toFixed(2)} [105% of ${activationPrice}])`);
+          }
+
+          // After checking exit, NOW calculate SL for NEXT candle
+          // ALWAYS calculate (not just when activated) so it follows price
+          // Trailing Stop should only move up when price makes NEW HIGH
+          // Use HIGH instead of average to track new highs
+
+          // Check if current candle made a new high
+          if (high > prevHigh) {
+            // New high achieved! Calculate incremental gain
+            const incrementalGain = high - prevHigh;
+            const newSL = nextSL + incrementalGain;
+
+            // Trailing Stop can only rise, never fall
+            if (newSL > nextSL) {
+              nextSL = newSL;
+              trailingStops.push({
+                time: Math.floor(candle.open_time / 1000),
+                price: nextSL,
+                isActivated: isActivated,  // Store activation state
+              });
+            }
+
+            // Update previous high for next comparison
+            prevHigh = high;
+          }
+          // If no new high, prevHigh stays the same (keeps previous high)
+        }
+
+        console.log(`📈 Trailing Stop calculated: ${trailingStops.length} updates, Final SL: ${currentSL}`);
+
+        return {
+          initialSL,
+          trailingStops,
+          exitPoint,
+          finalSL: currentSL,
+          isActive: exitPoint === null,
+          activationPoint,
+          activationPrice,
+        };
+      }
+
+      function drawTracedTrailingStop(ts, entryTime) {
+        // Draw Trailing Stop for traced wave structure
+        if (!ts) return;
+
+        console.log(`📈 Drawing Trailing Stop for traced wave:`, ts);
+
+        // Build SL data points: Create a point for EVERY candle from entry to exit
+        const slDataPoints = [];
+        const allCandles = data1d.candles;
+
+        // Find entry candle index
+        const entryIndex = allCandles.findIndex(c => Math.floor(c.open_time / 1000) === entryTime);
+        if (entryIndex === -1) {
+          console.error('❌ Entry candle not found for Trailing Stop visualization');
+          return;
+        }
+
+        // Determine exit index (or use last candle if still active)
+        let exitIndex = allCandles.length - 1;
+        if (ts.exitPoint) {
+          const foundExit = allCandles.findIndex(c => Math.floor(c.open_time / 1000) === ts.exitPoint.time);
+          if (foundExit !== -1) exitIndex = foundExit;
+        }
+
+        // Create a map of SL updates by timestamp
+        const slUpdates = new Map();
+        const initialSL = ts.initialSL || ts.initial_sl;
+
+        if (ts.trailingStops && ts.trailingStops.length > 0) {
+          ts.trailingStops.forEach(update => {
+            slUpdates.set(update.time, { price: update.price, isActivated: update.isActivated });
+          });
+        }
+
+        // Separate data points for pre-activation and active states
+        const preActivationPoints = [];
+        const activePoints = [];
+
+        // Now iterate through EVERY candle from entry to exit
+        let currentSL = initialSL;
+        let isActivated = false;
+        const activationTime = ts.activationPoint ? ts.activationPoint.time : null;
+
+        for (let i = entryIndex; i <= exitIndex; i++) {
+          const candle = allCandles[i];
+          const candleTime = Math.floor(candle.open_time / 1000);
+
+          // Check if we reached activation point
+          if (activationTime && candleTime >= activationTime) {
+            isActivated = true;
+          }
+
+          // Check if SL updated at this candle
+          if (slUpdates.has(candleTime)) {
+            const update = slUpdates.get(candleTime);
+            currentSL = update.price;
+            isActivated = update.isActivated;
+          }
+
+          // Add to appropriate array based on activation state
+          if (isActivated) {
+            activePoints.push({ time: candleTime, value: currentSL });
+          } else {
+            preActivationPoints.push({ time: candleTime, value: currentSL });
+          }
+        }
+
+        console.log(`📊 Drawing Trailing Stop: ${preActivationPoints.length} pre-activation points, ${activePoints.length} active points`);
+
+        // Draw Pre-Activation Trailing Stop (dashed orange line)
+        if (preActivationPoints.length > 0) {
+          const preActivationLine = tvChart.addLineSeries({
+            color: '#fb923c',  // Orange
+            lineWidth: 2,
+            lineStyle: 2,  // Dashed
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: true,
+            title: 'Trailing Stop (Calculating)',
+          });
+          preActivationLine.setData(preActivationPoints);
+          window.tracedWaveSeries.push(preActivationLine);
+        }
+
+        // Draw Active Trailing Stop (solid red line)
+        if (activePoints.length > 0) {
+          const activeLine = tvChart.addLineSeries({
+            color: '#ef4444',  // Red
+            lineWidth: 2,
+            lineStyle: 0,  // Solid
+            priceLineVisible: false,
+            lastValueVisible: true,
+            crosshairMarkerVisible: true,
+            title: 'Trailing Stop (Active)',
+          });
+          activeLine.setData(activePoints);
+          window.tracedWaveSeries.push(activeLine);
+        }
+
+        // Draw entry marker
+        const entryMarker = tvChart.addLineSeries({
+          color: '#10b981',  // Green
+          lineWidth: 0,
+          pointMarkersVisible: true,
+          pointMarkersRadius: 6,
+          title: 'Entry',
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        });
+        entryMarker.setData([{ time: entryTime, value: initialSL }]);
+        window.tracedWaveSeries.push(entryMarker);
+
+        // Draw exit marker if exists
+        if (ts.exitPoint) {
+          const exitMarker = tvChart.addLineSeries({
+            color: '#ef4444',  // Red
+            lineWidth: 0,
+            pointMarkersVisible: true,
+            pointMarkersRadius: 6,
+            title: 'Exit',
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+          });
+          exitMarker.setData([{ time: ts.exitPoint.time, value: ts.exitPoint.price }]);
+          window.tracedWaveSeries.push(exitMarker);
+        }
+
+        // Draw activation marker if exists
+        if (ts.activationPoint) {
+          const activationMarker = tvChart.addLineSeries({
+            color: '#fbbf24',  // Gold
+            lineWidth: 0,
+            pointMarkersVisible: true,
+            pointMarkersRadius: 6,
+            title: 'Activation',
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: true,
+          });
+          activationMarker.setData([{ time: ts.activationPoint.time, value: ts.activationPoint.price }]);
+          window.tracedWaveSeries.push(activationMarker);
+        }
+
+        console.log(`✅ Drew Trailing Stop for traced wave`);
+      }
+
+      function drawTrailingStop(waveIndex, arrowData = null) {
+        const wave = waveObjects[waveIndex];
+        if (!wave || !wave.isBearWave) {
+          console.warn(`⚠️ Not a Bear wave: ${wave?.waveId}`);
+          return;
+        }
+
+        let ts;
+        let entryTime;
+
+        if (arrowData) {
+          // Calculate Trailing Stop from BUY arrow entry point
+          console.log(`📈 Calculating Trailing Stop from BUY arrow:`, arrowData);
+          entryTime = arrowData.time;
+          // arrowData.price is the entry price (buy price)
+          // arrowData.cutloss is the initial stop loss
+          ts = calculateTrailingStopFromEntry(arrowData.time, arrowData.price, arrowData.cutloss);
+          if (!ts) {
+            console.warn(`⚠️ Could not calculate Trailing Stop from arrow`);
+            return;
+          }
+        } else {
+          // Use pre-calculated Trailing Stop from backend (wave pattern)
+          if (!wave.trailingStop) {
+            console.warn(`⚠️ No trailing stop data for wave ${wave.waveId}`);
+            return;
+          }
+          ts = wave.trailingStop;
+          entryTime = wave.points.t3;
+        }
+
+        console.log(`📈 Drawing Trailing Stop for ${wave.waveId}:`, ts);
+
+        // Hide Fibonacci first
+        if (wave.projectionSeries) {
+          wave.projectionSeries.forEach(series => tvChart.removeSeries(series));
+          wave.projectionSeries = [];
+        }
+
+        // Create trailing stop line series (step line showing SL updates)
+        wave.trailingStopSeries = [];
+
+        // Build SL data points: Create a point for EVERY candle from entry to exit
+        // This creates the proper "staircase" pattern instead of diagonal lines
+        const slDataPoints = [];
+
+        // Get all candles from data1d
+        const allCandles = data1d.candles;
+
+        // Find entry candle index
+        const entryIndex = allCandles.findIndex(c => Math.floor(c.open_time / 1000) === entryTime);
+        if (entryIndex === -1) {
+          console.error('❌ Entry candle not found for Trailing Stop visualization');
+          return;
+        }
+
+        // Determine exit index (or use last candle if still active)
+        let exitIndex = allCandles.length - 1;
+        if (ts.exitPoint) {
+          const foundExit = allCandles.findIndex(c => Math.floor(c.open_time / 1000) === ts.exitPoint.time);
+          if (foundExit !== -1) exitIndex = foundExit;
+        } else if (ts.exit_point) {
+          const exitTime = ts.exit_point.open_time ? Math.floor(ts.exit_point.open_time / 1000) : null;
+          if (exitTime) {
+            const foundExit = allCandles.findIndex(c => Math.floor(c.open_time / 1000) === exitTime);
+            if (foundExit !== -1) exitIndex = foundExit;
+          }
+        }
+
+        // Create a map of SL updates by timestamp for quick lookup
+        const slUpdates = new Map();
+        const initialSL = ts.initialSL || ts.initial_sl;
+
+        if (ts.trailingStops && ts.trailingStops.length > 0) {
+          // Frontend calculated (from arrow)
+          ts.trailingStops.forEach(update => {
+            slUpdates.set(update.time, update.price);
+          });
+        } else if (ts.trailing_stops && ts.trailing_stops.length > 0) {
+          // Backend calculated (from wave)
+          ts.trailing_stops.forEach(update => {
+            const timestamp = update.open_time ? Math.floor(update.open_time / 1000) : null;
+            if (timestamp) {
+              slUpdates.set(timestamp, update.price);
+            }
+          });
+        }
+
+        // Now iterate through EVERY candle from entry to exit
+        let currentSL = initialSL;
+        for (let i = entryIndex; i <= exitIndex; i++) {
+          const candle = allCandles[i];
+          const candleTime = Math.floor(candle.open_time / 1000);
+
+          // Check if SL updated at this candle
+          if (slUpdates.has(candleTime)) {
+            currentSL = slUpdates.get(candleTime);
+          }
+
+          // Add data point with current SL level (creates horizontal steps)
+          slDataPoints.push({ time: candleTime, value: currentSL });
+        }
+
+        // Draw Trailing Stop line (green step line)
+        const trailingStopLine = tvChart.addLineSeries({
+          color: '#22c55e',  // Green
+          lineWidth: 3,
+          lineStyle: 0,  // Solid line
+          priceLineVisible: false,
+          lastValueVisible: true,
+          crosshairMarkerVisible: true,
+          title: `${wave.waveId} Trailing SL`,
+        });
+        trailingStopLine.setData(slDataPoints);
+        wave.trailingStopSeries.push(trailingStopLine);
+
+        // Draw entry marker (Green dot)
+        const entryMarker = tvChart.addLineSeries({
+          color: '#10b981',  // Bright green
+          lineWidth: 0,
+          pointMarkersVisible: true,
+          pointMarkersRadius: 6,
+          title: 'Entry',
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+        });
+        entryMarker.setData([{ time: entryTime, value: ts.initialSL || ts.initial_sl }]);
+        wave.trailingStopSeries.push(entryMarker);
+
+        // Draw exit marker if position closed
+        const hasExit = ts.exitPoint || ts.exit_point;
+        if (hasExit) {
+          let exitTime, exitPrice;
+
+          if (ts.exitPoint) {
+            // Frontend calculated
+            exitTime = ts.exitPoint.time;
+            exitPrice = ts.exitPoint.price;
+          } else if (ts.exit_point) {
+            // Backend calculated
+            exitTime = ts.exit_point.open_time ? Math.floor(ts.exit_point.open_time / 1000) : null;
+            exitPrice = ts.exit_point.price;
+          }
+
+          if (exitTime) {
+            const exitMarker = tvChart.addLineSeries({
+              color: '#ef4444',  // Red
+              lineWidth: 0,
+              pointMarkersVisible: true,
+              pointMarkersRadius: 6,
+              title: 'Exit',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              crosshairMarkerVisible: false,
+            });
+            exitMarker.setData([{ time: exitTime, value: exitPrice }]);
+            wave.trailingStopSeries.push(exitMarker);
+          }
+        }
+
+        wave.showingProjection = false;
+        wave.showingTrailingStop = true;
+        console.log(`✅ Showed Trailing Stop for ${wave.waveId}`);
+      }
+
       function toggleWaveRetracement(waveIndex) {
         const wave = waveObjects[waveIndex];
         if (!wave) return;
@@ -1508,6 +2212,266 @@ def build_chart_section() -> str:
 
           wave.showingRetracement = true;
           console.log(`✅ Showed Retracement for ${wave.waveId}`);
+        }
+      }
+
+      function traceWaveStructureFromBuyArrow(arrowData) {
+        // Trace back Elliott Wave structure from BUY arrow position
+        // Pattern: Bearish(Blue) → Bullish(Orange) → Bearish(Green) → Bullish(BUY)
+        //
+        // Logic:
+        // 1. BUY is in Bullish zone → Skip entire Bullish zone
+        // 2. Find Bearish zone before → Swing Low 2 (Green) = lowest in entire zone
+        // 3. Find Bullish zone before → Swing High (Orange) = highest in entire zone
+        // 4. Find Bearish zone before → Swing Low 1 (Blue) = lowest in entire zone (must < Swing Low 2)
+
+        const candles1d = data1d.candles;
+        const buyTimestamp = arrowData.timestamp; // milliseconds
+
+        console.log(`🔍 Tracing Wave structure from BUY arrow at ${new Date(buyTimestamp).toISOString()}`);
+
+        // Find BUY candle index in 1D
+        let buyIndex = -1;
+        for (let i = candles1d.length - 1; i >= 0; i--) {
+          if (candles1d[i].open_time <= buyTimestamp) {
+            buyIndex = i;
+            break;
+          }
+        }
+
+        if (buyIndex < 10) {
+          console.warn('⚠️ Not enough candles before BUY point');
+          return null;
+        }
+
+        const buyZone = candles1d[buyIndex].action_zone;
+        console.log(`📍 BUY at index ${buyIndex}, zone: ${buyZone}`);
+
+        // Helper function to find entire EMA crossover zone boundaries
+        // Bull zone = EMA Fast > EMA Slow
+        // Bear zone = EMA Fast < EMA Slow
+        function findEMAZoneBoundaries(startIndex, isBullish) {
+          let zoneStart = -1;
+          let zoneEnd = -1;
+
+          // Find first candle of this EMA trend
+          for (let i = startIndex; i >= 0; i--) {
+            const candle = candles1d[i];
+            const isBullCandle = candle.ema_fast > candle.ema_slow;
+
+            if (isBullCandle === isBullish) {
+              zoneEnd = i;
+              break;
+            }
+          }
+
+          if (zoneEnd === -1) return null;
+
+          // Find where zone ends (scan backwards until EMA crossover)
+          for (let i = zoneEnd; i >= 0; i--) {
+            const candle = candles1d[i];
+            const isBullCandle = candle.ema_fast > candle.ema_slow;
+
+            if (isBullCandle === isBullish) {
+              zoneStart = i;
+            } else {
+              break; // EMA crossed over, exit zone
+            }
+          }
+
+          return { start: zoneStart, end: zoneEnd };
+        }
+
+        // Step 1: Skip current Bullish zone (where BUY is - EMA Fast > Slow)
+        const bullishZoneBuy = findEMAZoneBoundaries(buyIndex, true);
+        if (!bullishZoneBuy) {
+          console.warn('⚠️ Could not find Bullish zone for BUY');
+          return null;
+        }
+        console.log(`⏭️ Skipped Bullish EMA zone at BUY: [${bullishZoneBuy.start}, ${bullishZoneBuy.end}]`);
+
+        // Step 2: Find Bearish zone before → Swing Low 2 (Green)
+        const bearishZone2 = findEMAZoneBoundaries(bullishZoneBuy.start - 1, false);
+        if (!bearishZone2) {
+          console.warn('⚠️ Could not find Bearish zone for Swing Low 2');
+          return null;
+        }
+
+        // Find LOWEST point in this Bearish zone
+        let swingLow2 = null;
+        for (let i = bearishZone2.end; i >= bearishZone2.start; i--) {
+          if (!swingLow2 || candles1d[i].low < swingLow2.price) {
+            swingLow2 = {
+              index: i,
+              price: candles1d[i].low,
+              time: Math.floor(candles1d[i].open_time / 1000),
+              zone: candles1d[i].action_zone
+            };
+          }
+        }
+        console.log(`🟢 Swing Low 2 found at index ${swingLow2.index}, price ${swingLow2.price}, EMA Bear zone range [${bearishZone2.start}, ${bearishZone2.end}]`);
+
+        // Step 3: Find Bullish zone before → Swing High (Orange)
+        const bullishZone = findEMAZoneBoundaries(bearishZone2.start - 1, true);
+        if (!bullishZone) {
+          console.warn('⚠️ Could not find Bullish zone for Swing High');
+          return null;
+        }
+
+        // Find HIGHEST point in this Bullish zone
+        let swingHigh = null;
+        for (let i = bullishZone.end; i >= bullishZone.start; i--) {
+          if (!swingHigh || candles1d[i].high > swingHigh.price) {
+            swingHigh = {
+              index: i,
+              price: candles1d[i].high,
+              time: Math.floor(candles1d[i].open_time / 1000),
+              zone: candles1d[i].action_zone
+            };
+          }
+        }
+        console.log(`🟠 Swing High found at index ${swingHigh.index}, price ${swingHigh.price}, EMA Bull zone range [${bullishZone.start}, ${bullishZone.end}]`);
+
+        // Step 4: Find Bearish zone before → Swing Low 1 (Blue)
+        const bearishZone1 = findEMAZoneBoundaries(bullishZone.start - 1, false);
+        if (!bearishZone1) {
+          console.warn('⚠️ Could not find Bearish zone for Swing Low 1');
+          return null;
+        }
+
+        // Find LOWEST point in this Bearish zone
+        let swingLow1 = null;
+        for (let i = bearishZone1.end; i >= bearishZone1.start; i--) {
+          if (!swingLow1 || candles1d[i].low < swingLow1.price) {
+            swingLow1 = {
+              index: i,
+              price: candles1d[i].low,
+              time: Math.floor(candles1d[i].open_time / 1000),
+              zone: candles1d[i].action_zone
+            };
+          }
+        }
+
+        console.log(`🔵 Swing Low 1 found at index ${swingLow1.index}, price ${swingLow1.price}, EMA Bear zone range [${bearishZone1.start}, ${bearishZone1.end}]`);
+
+        // Validate: Swing Low 1 must be lower than Swing Low 2
+        if (swingLow1.price >= swingLow2.price) {
+          console.warn(`⚠️ Invalid Wave: Swing Low 1 (${swingLow1.price}) not lower than Swing Low 2 (${swingLow2.price})`);
+          return null;
+        }
+
+        console.log(`✅ Valid Wave Pattern: Low1(${swingLow1.price}) < Low2(${swingLow2.price}) < High(${swingHigh.price})`);
+
+        return {
+          swingLow1,
+          swingHigh,
+          swingLow2,
+          buyPoint: {
+            time: Math.floor(buyTimestamp / 1000),
+            price: arrowData.price
+          }
+        };
+      }
+
+      function toggleWaveStructure(waveIndex) {
+        // Show Elliott Wave structure + Trailing Stop when clicking Green dot (entry point)
+        const wave = waveObjects[waveIndex];
+        if (!wave || !wave.isBearWave) return;
+
+        console.log(`🌊 Clicked on entry point (Green dot) for ${wave.waveId}`);
+
+        // Toggle visibility
+        if (wave.showingWaveStructure) {
+          // Hide Wave Structure
+          if (wave.waveStructureSeries) {
+            wave.waveStructureSeries.forEach(series => tvChart.removeSeries(series));
+            wave.waveStructureSeries = [];
+          }
+          // Hide Trailing Stop
+          if (wave.trailingStopSeries) {
+            wave.trailingStopSeries.forEach(series => tvChart.removeSeries(series));
+            wave.trailingStopSeries = [];
+          }
+          wave.showingWaveStructure = false;
+          wave.showingTrailingStop = false;
+          console.log(`ℹ️ Hid Wave Structure for ${wave.waveId}`);
+        } else {
+          // Show Wave Structure + Trailing Stop
+          wave.waveStructureSeries = [];
+
+          // 1. Highlight the three reference points (Blue → Orange → Green)
+          const points = [
+            { time: wave.points.t1, price: wave.points.p1, color: '#2563eb', label: 'Swing Low 1' },  // Blue
+            { time: wave.points.t2, price: wave.points.p2, color: '#f97316', label: 'Swing High' },   // Orange
+            { time: wave.points.t3, price: wave.points.p3, color: '#10b981', label: 'Entry (Swing Low 2)' }  // Green
+          ];
+
+          // Draw highlighted markers for each point
+          points.forEach((point, idx) => {
+            const highlightSeries = tvChart.addLineSeries({
+              color: point.color,
+              lineWidth: 0,
+              pointMarkersVisible: true,
+              pointMarkersRadius: 8,  // Larger radius for highlight
+              title: point.label,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              crosshairMarkerVisible: true,
+            });
+            highlightSeries.setData([{ time: point.time, value: point.price }]);
+            wave.waveStructureSeries.push(highlightSeries);
+          });
+
+          // 2. Draw connecting lines between the three points
+          const connectingLine = tvChart.addLineSeries({
+            color: '#fbbf24',  // Yellow/Gold
+            lineWidth: 3,
+            lineStyle: 1,  // Dotted line
+            priceLineVisible: false,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+            title: 'Wave Structure',
+          });
+          connectingLine.setData([
+            { time: wave.points.t1, value: wave.points.p1 },  // Blue dot
+            { time: wave.points.t2, value: wave.points.p2 },  // Orange dot
+            { time: wave.points.t3, value: wave.points.p3 },  // Green dot
+          ]);
+          wave.waveStructureSeries.push(connectingLine);
+
+          // 3. Show key Fibonacci levels (100% Extension = Activation Price, 161.8% = Target)
+          const wave1Range = wave.points.p2 - wave.points.p1;
+          const projectionBase = wave.points.p3;
+
+          const keyLevels = [
+            { ratio: 1.000, label: '100% (Activation)', price: projectionBase + wave1Range, color: '#15803d' },      // Dark green
+            { ratio: 1.618, label: '161.8% (Target)', price: projectionBase + (wave1Range * 1.618), color: '#fbbf24' }  // Gold
+          ];
+
+          keyLevels.forEach(level => {
+            const fibLine = tvChart.addLineSeries({
+              color: level.color,
+              lineWidth: 4,
+              lineStyle: level.ratio === 1.618 ? 0 : 2,  // Solid for target, dashed for activation
+              priceLineVisible: false,
+              lastValueVisible: true,
+              crosshairMarkerVisible: false,
+              title: level.label,
+            });
+
+            const now = Math.floor(Date.now() / 1000);
+            fibLine.setData([
+              { time: now - (10 * 365 * 24 * 60 * 60), value: level.price },
+              { time: now + (2 * 365 * 24 * 60 * 60), value: level.price }
+            ]);
+            wave.waveStructureSeries.push(fibLine);
+          });
+
+          // 4. Show Trailing Stop
+          drawTrailingStop(waveIndex, null);
+
+          wave.showingWaveStructure = true;
+          console.log(`✅ Showed Wave Structure + Trailing Stop for ${wave.waveId}`);
         }
       }
 
@@ -1705,6 +2669,13 @@ def build_chart_section() -> str:
       }
 
       async function loadCandles(pair) {
+        // Clear BUY arrow markers and traced wave state on reload
+        buyArrowMarkers = [];
+        window.activeTracedArrowTime = null;
+        if (window.tracedWaveSeries) {
+          window.tracedWaveSeries.forEach(series => tvChart.removeSeries(series));
+          window.tracedWaveSeries = [];
+        }
         try {
           console.log("🔄 Loading candles for pair:", pair);
           initChart();
@@ -1904,26 +2875,35 @@ def build_chart_section() -> str:
 
           console.log(`✅ Found ${zones.length} trend zones (Bull/Bear)`);
 
-          // Create area highlights for each zone (2 colors: Bull=green, Bear=red)
+          // Create subtle background highlights using BaselineSeries
+          // This prevents black blocks when zoomed
           zones.forEach(zone => {
             const isBull = zone.color === 'green';
 
-            // Bull zones: Fast EMA is above Slow → use Fast (top line)
-            // Bear zones: Fast EMA is below Slow → use Slow (top line)
-            const topLineData = isBull ? zone.fastData : zone.slowData;
-            const fillPalette = zoneFill[zone.color];
-
-            const area = tvChart.addAreaSeries({
-              topColor: fillPalette.top,
-              bottomColor: fillPalette.bottom,
-              lineColor: 'transparent',
-              lineWidth: 0,
+            // Use BaselineSeries with very low opacity for subtle background
+            const baseline = tvChart.addBaselineSeries({
+              baseValue: { type: 'price', price: 0 },  // Fill from bottom of chart
+              topLineColor: 'transparent',
+              topFillColor1: isBull ? 'rgba(34, 197, 94, 0.08)' : 'rgba(239, 68, 68, 0.08)',
+              topFillColor2: isBull ? 'rgba(34, 197, 94, 0.02)' : 'rgba(239, 68, 68, 0.02)',
+              bottomLineColor: 'transparent',
+              bottomFillColor1: 'transparent',
+              bottomFillColor2: 'transparent',
+              lineVisible: false,
               priceLineVisible: false,
               lastValueVisible: false,
               crosshairMarkerVisible: false,
             });
-            area.setData(topLineData);
-            zoneSeries.push(area);
+
+            // Use the higher EMA line as the "top" for baseline
+            const topData = isBull ? zone.fastData : zone.slowData;
+            const baselineFormattedData = topData.map(d => ({
+              time: d.time,
+              value: d.value,
+            }));
+
+            baseline.setData(baselineFormattedData);
+            zoneSeries.push(baseline);
           });
 
           console.log(`✅ Created ${zones.length} Bull/Bear zone highlights`);
@@ -1998,14 +2978,29 @@ def build_chart_section() -> str:
                     validation_1d_pattern: true, // blue→green
                   });
 
-                  // Show marker with normal green color
+                  // Validate Elliott Wave pattern
+                  const tempArrow = { timestamp: c1d.open_time, price: buyPrice };
+                  const waveStructure = traceWaveStructureFromBuyArrow(tempArrow);
+                  const hasValidWave = waveStructure !== null;
+
+                  // Show marker: Green = valid Wave, Orange = no valid Wave
                   const t = Math.floor(c1d.open_time / 1000);
+                  const arrowColor = hasValidWave ? '#22c55e' : '#fb923c'; // Green or Orange
                   markers.push({
                     time: t,
                     position: 'belowBar',
-                    color: '#22c55e', // Normal green
+                    color: arrowColor,
                     shape: 'arrowUp',
                     text: '',
+                  });
+
+                  // Store BUY arrow for click detection
+                  buyArrowMarkers.push({
+                    time: t,
+                    timestamp: c1d.open_time,
+                    price: buyPrice,
+                    cutloss: cutlossPrice,
+                    hasValidWave: hasValidWave, // Store validation result
                   });
                 }
 
@@ -2082,14 +3077,28 @@ def build_chart_section() -> str:
                       validation_1h_entry: true,
                     });
 
+                    // Validate Elliott Wave pattern
+                    const tempArrow = { timestamp: entry1h.entryTime, price: buyPrice };
+                    const waveStructure = traceWaveStructureFromBuyArrow(tempArrow);
+                    const hasValidWave = waveStructure !== null;
+
                     // Show marker with GOLD color (highly recommended)
                     const t = typeof entry1h.entryTime === "number" ? Math.floor(entry1h.entryTime / 1000) : entry1h.entryTime;
                     markers.push({
                       time: t,
                       position: 'belowBar',
-                      color: '#FFD700', // GOLD - highly recommended
+                      color: '#FFD700', // GOLD - highly recommended (always gold for current signals)
                       shape: 'arrowUp',
                       text: '',
+                    });
+
+                    // Store BUY arrow for click detection
+                    buyArrowMarkers.push({
+                      time: t,
+                      timestamp: entry1h.entryTime,
+                      price: buyPrice,
+                      cutloss: cutlossPrice,
+                      hasValidWave: hasValidWave, // Store validation result
                     });
                   }
                 }
@@ -2136,6 +3145,7 @@ def build_chart_section() -> str:
             const buyCount = markers.filter(m => markerDataMap.get(m.time * 1000)?.type === 'BUY').length;
             const sellCount = markers.filter(m => markerDataMap.get(m.time * 1000)?.type === 'SELL').length;
             console.log(`   BUY signals: ${buyCount}, SELL signals: ${sellCount}`);
+            console.log(`🎯 BUY Arrow Markers stored: ${buyArrowMarkers.length}`, buyArrowMarkers);
 
           } else {
             // Advanced Mode: 2-candle pattern + Bull trend + all 4 rules must pass
@@ -2241,6 +3251,14 @@ def build_chart_section() -> str:
                         color: '#22c55e',
                         shape: 'arrowUp',
                         text: '✓', // Checkmark for advanced mode
+                      });
+
+                      // Store BUY arrow for click detection
+                      buyArrowMarkers.push({
+                        time: t,
+                        timestamp: c.open_time,
+                        price: buyPrice,
+                        cutloss: cutlossPrice,
                       });
                     }
                   }
