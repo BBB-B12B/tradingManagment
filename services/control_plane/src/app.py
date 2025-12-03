@@ -326,8 +326,9 @@ def build_chart_section() -> str:
         return rsi;
       }
 
-      // Detect RSI Divergence แบบ State Machine (ตามหลักการที่ User อธิบาย)
+      // Detect RSI Divergence แบบ State Machine (ปรับปรุงแล้ว)
       // คำว่า "ไม่ติดกัน" หมายถึง ต้องออกจากโซนสุดขั้วก่อน (RSI กลับเข้าโซนปกติ) แล้วจึงกลับเข้าโซนสุดขั้วอีกครั้ง
+      // ปรับให้ flexible: Zone 2 ไม่จำเป็นต้องเข้าโซนสุดขั้วเต็ม แค่ใกล้เคียงก็พอ (68.5/31.5)
       function detectDivergence(priceData, rsiData, zoneData) {
         const divergences = [];
         const candleStates = [];
@@ -338,18 +339,33 @@ def build_chart_section() -> str:
         }
 
         console.log("🔍 Starting Zone-based divergence detection with", priceData.length, "candles");
+        console.log("📊 RSI Data points:", rsiData.length);
+        console.log("📊 Zone Data points:", zoneData.length);
 
-        // Bullish Divergence State (Oversold < 30)
+        // Thresholds
+        const OVERSOLD_THRESHOLD = 30;           // Zone 1 ต้องต่ำกว่า 30
+        const NEAR_OVERSOLD_THRESHOLD = 35;      // Zone 2 ต่ำกว่าหรือเท่ากับ 35 (ปรับจาก 31.5)
+        const OVERBOUGHT_THRESHOLD = 70;         // Zone 1 ต้องสูงกว่า 70
+        const NEAR_OVERBOUGHT_THRESHOLD = 65;    // Zone 2 สูงกว่าหรือเท่ากับ 65 (ปรับจาก 68.5)
+        const MIN_CANDLES_BETWEEN_ZONES = 10;    // ระยะห่างขั้นต่ำระหว่าง Zone 1 และ Zone 2
+
+        // Bullish Divergence State (Oversold < 30 สำหรับ Zone 1, <= 35 สำหรับ Zone 2)
         let bullishCurrentZone = []; // แท่งปัจจุบันที่อยู่ใน oversold
+        let bullishNearZone = [];    // แท่งที่อยู่ใกล้ oversold (Zone 2 <= 35)
         let bullishPreviousZone = null; // จุดต่ำสุดของโซน oversold ก่อนหน้า
+        let bullishPreviousTrendType = null; // 'bear' หรือ 'bull' - ชัดเจนกว่า boolean
         let bullishActive = false;
         let bullishDivPoint = null;
+        let bullishWaitingForNearZone = false; // รอ Zone 2 ที่ใกล้เคียง
 
-        // Bearish Divergence State (Overbought > 70)
+        // Bearish Divergence State (Overbought > 70 สำหรับ Zone 1, >= 65 สำหรับ Zone 2)
         let bearishCurrentZone = []; // แท่งปัจจุบันที่อยู่ใน overbought
+        let bearishNearZone = [];    // แท่งที่อยู่ใกล้ overbought (Zone 2 >= 65)
         let bearishPreviousZone = null; // จุดสูงสุดของโซน overbought ก่อนหน้า
+        let bearishPreviousTrendType = null; // 'bear' หรือ 'bull' - ชัดเจนกว่า boolean
         let bearishActive = false;
         let bearishDivPoint = null;
+        let bearishWaitingForNearZone = false; // รอ Zone 2 ที่ใกล้เคียง
 
         for (let i = 0; i < priceData.length; i++) {
           if (!priceData[i] || !rsiData[i] || !zoneData[i]) continue;
@@ -362,6 +378,7 @@ def build_chart_section() -> str:
             : candle.open_time;
 
           const isBullish = zone.ema_fast > zone.ema_slow;
+          const isBearish = zone.ema_fast < zone.ema_slow;
 
           const state = {
             index: i,
@@ -372,58 +389,143 @@ def build_chart_section() -> str:
             cutloss: null
           };
 
-          // === BULLISH DIVERGENCE (Oversold < 30) ===
+          // === BULLISH DIVERGENCE (Oversold < 30 สำหรับ Zone 1, <= 35 สำหรับ Zone 2) ===
           if (!bullishActive) {
-            if (rsi < 30) {
-              // อยู่ในโซน oversold - เก็บข้อมูล
+            // Zone 1: ต้องต่ำกว่า 30 (extreme oversold)
+            if (rsi < OVERSOLD_THRESHOLD) {
               bullishCurrentZone.push({
                 index: i,
                 time: timestamp,
                 rsi: rsi,
-                price: candle.low
+                price: candle.low  // ✅ ใช้ราคาต่ำสุด (low) สำหรับ Bullish Divergence
               });
-            } else {
-              // ออกจากโซน oversold แล้ว
-              if (bullishCurrentZone.length > 0) {
-                // หาจุดต่ำสุดในโซนที่เพิ่งผ่านมา
-                const lowestPoint = bullishCurrentZone.reduce((min, p) => p.rsi < min.rsi ? p : min);
-                console.log(`📉 Oversold zone ended. Lowest RSI: ${lowestPoint.rsi.toFixed(2)} at index ${lowestPoint.index}`);
+            }
+            // ออกจาก Zone 1 แล้ว (RSI >= 30)
+            else if (bullishCurrentZone.length > 0 && rsi >= OVERSOLD_THRESHOLD) {
+              // จบ Zone 1 - หาจุดต่ำสุด
+              const lowestPoint = bullishCurrentZone.reduce((min, p) => p.rsi < min.rsi ? p : min);
+              console.log(`📉 Oversold Zone 1 ended. Lowest RSI: ${lowestPoint.rsi.toFixed(2)} at index ${lowestPoint.index}, Trend: ${isBearish ? 'Bear' : 'Bull'}`);
 
-                // ถ้ามีโซนก่อนหน้า → เปรียบเทียบ
-                if (bullishPreviousZone) {
-                  // ตรวจสอบ: RSI จุด 2 สูงกว่าจุด 1 + ราคาจุด 2 ต่ำกว่าจุด 1
-                  if (lowestPoint.rsi > bullishPreviousZone.rsi) {
-                    // ต้องเช็คราคาด้วย (ต้องหาราคาต่ำสุดในช่วงโซนนั้น)
-                    const prevLow = bullishPreviousZone.price;
-                    const currLow = bullishCurrentZone.reduce((min, p) => p.price < min.price ? p : min).price;
+              // เก็บเป็น Previous Zone (ถ้ายังไม่มี หรือ Zone ใหม่ต่ำกว่า Zone เก่า)
+              if (!bullishPreviousZone || lowestPoint.rsi < bullishPreviousZone.rsi) {
+                bullishPreviousZone = lowestPoint;
+                bullishPreviousTrendType = isBearish ? 'bear' : 'bull'; // ✅ ชัดเจนกว่า
+                console.log(`   → Set as new Zone 1 baseline for Bullish Divergence (Trend: ${isBearish ? 'Bear' : 'Bull'})`);
+              }
+              bullishCurrentZone = [];
+              bullishWaitingForNearZone = true;
+              bullishNearZone = [];
+            }
 
-                    if (currLow < prevLow) {
-                      console.log(`🟢 BULLISH DIVERGENCE DETECTED!`);
-                      console.log(`   Zone 1: Index ${bullishPreviousZone.index}, RSI ${bullishPreviousZone.rsi.toFixed(2)}, Price ${prevLow}`);
-                      console.log(`   Zone 2: Index ${lowestPoint.index}, RSI ${lowestPoint.rsi.toFixed(2)}, Price ${currLow}`);
+            // ✅ ถ้ากำลังรอ Zone 2 แต่เจอ Extreme Oversold ใหม่ (RSI < 30) → อัพเดท Zone 1
+            if (bullishWaitingForNearZone && rsi < OVERSOLD_THRESHOLD && isBearish) {
+              // เก็บจุดใหม่ที่แรงกว่า (RSI ต่ำกว่า)
+              if (!bullishPreviousZone || rsi < bullishPreviousZone.rsi) {
+                console.log(`🔄 Found stronger Zone 1: RSI ${rsi.toFixed(2)} < previous ${bullishPreviousZone ? bullishPreviousZone.rsi.toFixed(2) : 'N/A'} → Update Zone 1`);
+                bullishPreviousZone = {
+                  index: i,
+                  time: timestamp,
+                  rsi: rsi,
+                  price: candle.low
+                };
+                bullishPreviousTrendType = 'bear';
+                bullishNearZone = []; // Reset Zone 2 เพราะมี Zone 1 ใหม่
+              }
+            }
 
-                      divergences.push({
-                        type: 'bullish',
-                        startIndex: bullishPreviousZone.index,
-                        endIndex: lowestPoint.index,
-                        startTime: bullishPreviousZone.time,
-                        endTime: lowestPoint.time,
-                        priceStart: prevLow,
-                        priceEnd: currLow,
-                        rsiStart: bullishPreviousZone.rsi,
-                        rsiEnd: lowestPoint.rsi,
-                      });
+            // ตรวจสอบว่า Trend เปลี่ยนหรือไม่ (EMA crossover) → Reset
+            if (bullishWaitingForNearZone && bullishPreviousTrendType !== null) {
+              // ถ้า Zone 1 เป็น Bear แต่ตอนนี้กลายเป็น Bull → Reset
+              if (bullishPreviousTrendType === 'bear' && !isBearish) {
+                console.log(`⚠️ Trend changed from Bear to Bull → Reset Bullish Divergence tracking`);
+                bullishPreviousZone = null;
+                bullishPreviousTrendType = null;
+                bullishNearZone = [];
+                bullishWaitingForNearZone = false;
+              }
+            }
 
-                      bullishActive = true;
-                      bullishDivPoint = lowestPoint;
-                    }
+            // รอ Zone 2: RSI ย่อกลับมาใกล้ oversold (<= 35) หลังจากมี Zone 1 แล้ว
+            if (bullishWaitingForNearZone && rsi <= NEAR_OVERSOLD_THRESHOLD && isBearish) {
+              bullishNearZone.push({
+                index: i,
+                time: timestamp,
+                rsi: rsi,
+                price: candle.low  // ✅ ใช้ราคาต่ำสุด (low)
+              });
+            }
+            // ออกจาก Near Zone 2 แล้ว (RSI > 35) → ตรวจจับ Divergence
+            else if (bullishWaitingForNearZone && bullishNearZone.length > 0 && rsi > NEAR_OVERSOLD_THRESHOLD) {
+              const lowestNearPoint = bullishNearZone.reduce((min, p) => p.rsi < min.rsi ? p : min);
+              console.log(`📉 Near-Oversold Zone 2 candidate. Lowest RSI: ${lowestNearPoint.rsi.toFixed(2)} at index ${lowestNearPoint.index}`);
+
+              // ✅ เช็คระยะห่างระหว่าง Zone 1 และ Zone 2
+              const tooClose = bullishPreviousZone && lowestNearPoint.index - bullishPreviousZone.index < MIN_CANDLES_BETWEEN_ZONES;
+              if (tooClose) {
+                console.log(`   ⚠️ Zones too close (${lowestNearPoint.index - bullishPreviousZone.index} candles) → Skip this Zone 2`);
+                bullishNearZone = [];
+              }
+
+              // เปรียบเทียบ Zone 1 vs Zone 2 (ถ้าไม่ใกล้เกินไป)
+              if (!tooClose && bullishPreviousZone && bullishPreviousTrendType === 'bear') {
+                // ถ้า Zone 2 มี RSI ต่ำกว่าหรือเท่ากับ Zone 1 → อัพเดท Zone 1 ใหม่
+                if (lowestNearPoint.rsi <= bullishPreviousZone.rsi) {
+                  console.log(`   → Zone 2 RSI (${lowestNearPoint.rsi.toFixed(2)}) <= Zone 1 RSI (${bullishPreviousZone.rsi.toFixed(2)}) → Update Zone 1`);
+                  // ✅ แก้ไข: อัพเดทได้ถ้าต่ำกว่า ไม่ต้องเช็ค OVERSOLD_THRESHOLD
+                  bullishPreviousZone = lowestNearPoint;
+                  bullishPreviousTrendType = 'bear'; // ยังคงเป็น Bear
+                }
+                // Zone 2 มี RSI สูงกว่า Zone 1 → เช็ค Divergence
+                else if (lowestNearPoint.rsi > bullishPreviousZone.rsi) {
+                  const prevLow = bullishPreviousZone.price;
+                  const currLow = bullishNearZone.reduce((min, p) => p.price < min.price ? p : min).price;
+
+                  if (currLow < prevLow) {
+                    const priceDiff = ((prevLow - currLow) / prevLow * 100).toFixed(2);
+                    const rsiDiff = (lowestNearPoint.rsi - bullishPreviousZone.rsi).toFixed(2);
+
+                    console.log(`🟢 BULLISH DIVERGENCE DETECTED!`);
+                    console.log(`   Zone 1: Index ${bullishPreviousZone.index}, RSI ${bullishPreviousZone.rsi.toFixed(2)}, Price ${prevLow.toFixed(2)}`);
+                    console.log(`   Zone 2: Index ${lowestNearPoint.index}, RSI ${lowestNearPoint.rsi.toFixed(2)}, Price ${currLow.toFixed(2)}`);
+                    console.log(`   Distance: ${lowestNearPoint.index - bullishPreviousZone.index} candles`);
+                    console.log(`   Price Lower by ${priceDiff}%, RSI Higher by ${rsiDiff}`);
+                    console.log(`   Trend: Bear ✓ (maintained throughout)`);
+
+                    divergences.push({
+                      type: 'bullish',
+                      startIndex: bullishPreviousZone.index,
+                      endIndex: lowestNearPoint.index,
+                      startTime: bullishPreviousZone.time,
+                      endTime: lowestNearPoint.time,
+                      priceStart: prevLow,
+                      priceEnd: currLow,
+                      rsiStart: bullishPreviousZone.rsi,
+                      rsiEnd: lowestNearPoint.rsi,
+                    });
+
+                    bullishActive = true;
+                    bullishDivPoint = lowestNearPoint;
+
+                    // Reset
+                    bullishPreviousZone = null;
+                    bullishPreviousTrendType = null;
+                    bullishWaitingForNearZone = false;
+                  } else {
+                    console.log(`   → Price not diverging (${currLow.toFixed(2)} >= ${prevLow.toFixed(2)}) → Keep Zone 1, wait for next Zone 2`);
                   }
                 }
-
-                // บันทึกโซนนี้เป็นโซนก่อนหน้า
-                bullishPreviousZone = lowestPoint;
-                bullishCurrentZone = [];
               }
+
+              bullishNearZone = [];
+            }
+
+            // Reset ถ้า RSI ขึ้นสูงเกิน 50 (ออกจากช่วง oversold โดยสิ้นเชิง)
+            if (bullishWaitingForNearZone && rsi > 50) {
+              console.log(`⚠️ RSI rose above 50 → Reset Bullish Divergence tracking`);
+              bullishPreviousZone = null;
+              bullishPreviousTrendType = null;
+              bullishNearZone = [];
+              bullishWaitingForNearZone = false;
             }
           }
 
@@ -431,25 +533,40 @@ def build_chart_section() -> str:
           if (bullishActive) {
             state.strong_buy = 'Active';
 
-            if (zone.zone === 'blue') {
-              // คำนวณ Cutloss
-              let cutloss = candle.close * 0.95;
+            // ✅ เงื่อนไขการยืนยันการกลับตัว (Reversal Confirmation)
+            // 1. ต้องเข้า Blue Zone (uptrend confirmed)
+            // 2. RSI ต้องกลับมาเหนือ 40 (แรงซื้อกลับมา)
+            if (zone.zone === 'blue' && rsi > 40) {
+              // ✅ คำนวณ Cutloss แบบปรับปรุง - ใช้ swing low ย้อนหลัง 30 แท่ง
+              let cutloss = candle.low; // เริ่มจากราคาต่ำสุดปัจจุบัน
               const lookback = 30;
-              const reds = [];
 
+              // หา swing low (จุดต่ำสุด) ย้อนหลัง
+              for (let j = i - 1; j >= Math.max(0, i - lookback); j--) {
+                if (!priceData[j]) continue;
+                if (priceData[j].low < cutloss) {
+                  cutloss = priceData[j].low;
+                }
+              }
+
+              // เพิ่ม safety buffer 2%
+              cutloss = cutloss * 0.98;
+
+              // ตรวจสอบว่ามี red zone ย้อนหลังไหม (เพิ่มความปลอดภัย)
+              const reds = [];
               for (let j = i - 1; j >= Math.max(0, i - lookback); j--) {
                 if (!zoneData[j]) continue;
                 if (zoneData[j].zone === 'red') {
-                  reds.push(priceData[j].close);
+                  reds.push(priceData[j].low);
                 } else if (reds.length > 0) {
                   break;
                 }
               }
 
+              // ถ้าเจอ red zone ให้ใช้จุดต่ำสุดของ red zone (ปลอดภัยกว่า)
               if (reds.length > 0) {
-                cutloss = Math.min(...reds);
-              } else if (i >= 2) {
-                cutloss = Math.min(priceData[i - 2].close, priceData[i - 1].close);
+                const redLow = Math.min(...reds) * 0.98;
+                cutloss = Math.min(cutloss, redLow);
               }
 
               state.special_signal = 'BUY';
@@ -457,60 +574,156 @@ def build_chart_section() -> str:
               state.strong_buy = 'none-Active';
               bullishActive = false;
               bullishPreviousZone = null;
-              console.log(`🔔 Special BUY signal at index ${i}, Cutloss: ${cutloss.toFixed(2)}`);
+              console.log(`🔔 ✅ BUY SIGNAL CONFIRMED at index ${i}`);
+              console.log(`   Cutloss: ${cutloss.toFixed(2)} (Swing low with 2% buffer)`);
+              console.log(`   RSI: ${rsi.toFixed(2)} (above 40 ✓)`);
+              console.log(`   Zone: Blue (uptrend ✓)`);
+            }
+            // ถ้ายังไม่เข้าเงื่อนไข ให้รอต่อ แต่ถ้า RSI ลงต่ำกว่า 30 อีกครั้ง → ยกเลิกสัญญาณ
+            else if (rsi < 30) {
+              console.log(`⚠️ RSI dropped below 30 again → Cancel BUY signal (failed reversal)`);
+              bullishActive = false;
+              bullishPreviousZone = null;
             }
           }
 
-          // === BEARISH DIVERGENCE (Overbought > 70) ===
+          // === BEARISH DIVERGENCE (Overbought > 70 สำหรับ Zone 1, >= 65 สำหรับ Zone 2) ===
           if (!bearishActive) {
-            if (rsi > 70) {
-              // อยู่ในโซน overbought - เก็บข้อมูล
+            // Zone 1: ต้องสูงกว่า 70 (extreme overbought)
+            if (rsi > OVERBOUGHT_THRESHOLD) {
               bearishCurrentZone.push({
                 index: i,
                 time: timestamp,
                 rsi: rsi,
-                price: candle.high
+                price: candle.high  // ✅ ใช้ราคาสูงสุด (high) สำหรับ Bearish Divergence
               });
-            } else {
-              // ออกจากโซน overbought แล้ว
-              if (bearishCurrentZone.length > 0) {
-                // หาจุดสูงสุดในโซนที่เพิ่งผ่านมา
-                const highestPoint = bearishCurrentZone.reduce((max, p) => p.rsi > max.rsi ? p : max);
-                console.log(`📈 Overbought zone ended. Highest RSI: ${highestPoint.rsi.toFixed(2)} at index ${highestPoint.index}`);
+            }
+            // ออกจาก Zone 1 แล้ว (RSI <= 70)
+            else if (bearishCurrentZone.length > 0 && rsi <= OVERBOUGHT_THRESHOLD) {
+              // จบ Zone 1 - หาจุดสูงสุด
+              const highestPoint = bearishCurrentZone.reduce((max, p) => p.rsi > max.rsi ? p : max);
+              console.log(`📈 Overbought Zone 1 ended. Highest RSI: ${highestPoint.rsi.toFixed(2)} at index ${highestPoint.index}, Trend: ${isBullish ? 'Bull' : 'Bear'}`);
 
-                // ถ้ามีโซนก่อนหน้า → เปรียบเทียบ
-                if (bearishPreviousZone) {
-                  // ตรวจสอบ: RSI จุด 2 ต่ำกว่าจุด 1 + ราคาจุด 2 สูงกว่าจุด 1 + เป็น Bull
-                  if (highestPoint.rsi < bearishPreviousZone.rsi) {
-                    const prevHigh = bearishPreviousZone.price;
-                    const currHigh = bearishCurrentZone.reduce((max, p) => p.price > max.price ? p : max).price;
+              // เก็บเป็น Previous Zone (ถ้ายังไม่มี หรือ Zone ใหม่สูงกว่า Zone เก่า)
+              if (!bearishPreviousZone || highestPoint.rsi > bearishPreviousZone.rsi) {
+                bearishPreviousZone = highestPoint;
+                bearishPreviousTrendType = isBullish ? 'bull' : 'bear'; // ✅ ชัดเจนกว่า
+                console.log(`   → Set as new Zone 1 baseline for Bearish Divergence (Trend: ${isBullish ? 'Bull' : 'Bear'})`);
+              }
+              bearishCurrentZone = [];
+              bearishWaitingForNearZone = true;
+              bearishNearZone = [];
+            }
 
-                    if (currHigh > prevHigh && isBullish) {
-                      console.log(`🔴 BEARISH DIVERGENCE DETECTED!`);
-                      console.log(`   Zone 1: Index ${bearishPreviousZone.index}, RSI ${bearishPreviousZone.rsi.toFixed(2)}, Price ${prevHigh}`);
-                      console.log(`   Zone 2: Index ${highestPoint.index}, RSI ${highestPoint.rsi.toFixed(2)}, Price ${currHigh}`);
+            // ✅ ถ้ากำลังรอ Zone 2 แต่เจอ Extreme Overbought ใหม่ (RSI > 70) → อัพเดท Zone 1
+            if (bearishWaitingForNearZone && rsi > OVERBOUGHT_THRESHOLD && isBullish) {
+              // เก็บจุดใหม่ที่แรงกว่า
+              if (!bearishPreviousZone || rsi > bearishPreviousZone.rsi) {
+                console.log(`🔄 Found stronger Zone 1: RSI ${rsi.toFixed(2)} > previous ${bearishPreviousZone ? bearishPreviousZone.rsi.toFixed(2) : 'N/A'} → Update Zone 1`);
+                bearishPreviousZone = {
+                  index: i,
+                  time: timestamp,
+                  rsi: rsi,
+                  price: candle.high
+                };
+                bearishPreviousTrendType = 'bull';
+                bearishNearZone = []; // Reset Zone 2 เพราะมี Zone 1 ใหม่
+              }
+            }
 
-                      divergences.push({
-                        type: 'bearish',
-                        startIndex: bearishPreviousZone.index,
-                        endIndex: highestPoint.index,
-                        startTime: bearishPreviousZone.time,
-                        endTime: highestPoint.time,
-                        priceStart: prevHigh,
-                        priceEnd: currHigh,
-                        rsiStart: bearishPreviousZone.rsi,
-                        rsiEnd: highestPoint.rsi,
-                      });
+            // ตรวจสอบว่า Trend เปลี่ยนหรือไม่ (EMA crossover) → Reset
+            if (bearishWaitingForNearZone && bearishPreviousTrendType !== null) {
+              // ถ้า Zone 1 เป็น Bull แต่ตอนนี้กลายเป็น Bear → Reset
+              if (bearishPreviousTrendType === 'bull' && !isBullish) {
+                console.log(`⚠️ Trend changed from Bull to Bear → Reset Bearish Divergence tracking`);
+                bearishPreviousZone = null;
+                bearishPreviousTrendType = null;
+                bearishNearZone = [];
+                bearishWaitingForNearZone = false;
+              }
+            }
 
-                      bearishActive = true;
-                      bearishDivPoint = highestPoint;
-                    }
+            // รอ Zone 2: RSI เด้งกลับมาใกล้ overbought (>= 65) หลังจากมี Zone 1 แล้ว
+            if (bearishWaitingForNearZone && rsi >= NEAR_OVERBOUGHT_THRESHOLD && isBullish) {
+              bearishNearZone.push({
+                index: i,
+                time: timestamp,
+                rsi: rsi,
+                price: candle.high  // ✅ ใช้ราคาสูงสุด (high)
+              });
+            }
+            // ออกจาก Near Zone 2 แล้ว (RSI < 65) → ตรวจจับ Divergence
+            else if (bearishWaitingForNearZone && bearishNearZone.length > 0 && rsi < NEAR_OVERBOUGHT_THRESHOLD) {
+              const highestNearPoint = bearishNearZone.reduce((max, p) => p.rsi > max.rsi ? p : max);
+              console.log(`📈 Near-Overbought Zone 2 candidate. Highest RSI: ${highestNearPoint.rsi.toFixed(2)} at index ${highestNearPoint.index}`);
+
+              // ✅ เช็คระยะห่างระหว่าง Zone 1 และ Zone 2
+              const tooCloseBearish = bearishPreviousZone && highestNearPoint.index - bearishPreviousZone.index < MIN_CANDLES_BETWEEN_ZONES;
+              if (tooCloseBearish) {
+                console.log(`   ⚠️ Zones too close (${highestNearPoint.index - bearishPreviousZone.index} candles) → Skip this Zone 2`);
+                bearishNearZone = [];
+              }
+
+              // เปรียบเทียบ Zone 1 vs Zone 2 (ถ้าไม่ใกล้เกินไป)
+              if (!tooCloseBearish && bearishPreviousZone && bearishPreviousTrendType === 'bull') {
+                // ถ้า Zone 2 มี RSI สูงกว่าหรือเท่ากับ Zone 1 → อัพเดท Zone 1 ใหม่
+                if (highestNearPoint.rsi >= bearishPreviousZone.rsi) {
+                  console.log(`   → Zone 2 RSI (${highestNearPoint.rsi.toFixed(2)}) >= Zone 1 RSI (${bearishPreviousZone.rsi.toFixed(2)}) → Update Zone 1`);
+                  // ✅ แก้ไข: อัพเดทได้ถ้าสูงกว่า ไม่ต้องเช็ค OVERBOUGHT_THRESHOLD
+                  bearishPreviousZone = highestNearPoint;
+                  bearishPreviousTrendType = 'bull'; // ยังคงเป็น Bull
+                }
+                // Zone 2 มี RSI ต่ำกว่า Zone 1 → เช็ค Divergence
+                else if (highestNearPoint.rsi < bearishPreviousZone.rsi) {
+                  const prevHigh = bearishPreviousZone.price;
+                  const currHigh = bearishNearZone.reduce((max, p) => p.price > max.price ? p : max).price;
+
+                  if (currHigh > prevHigh) {
+                    const priceDiff = ((currHigh - prevHigh) / prevHigh * 100).toFixed(2);
+                    const rsiDiff = (bearishPreviousZone.rsi - highestNearPoint.rsi).toFixed(2);
+
+                    console.log(`🔴 BEARISH DIVERGENCE DETECTED!`);
+                    console.log(`   Zone 1: Index ${bearishPreviousZone.index}, RSI ${bearishPreviousZone.rsi.toFixed(2)}, Price ${prevHigh.toFixed(2)}`);
+                    console.log(`   Zone 2: Index ${highestNearPoint.index}, RSI ${highestNearPoint.rsi.toFixed(2)}, Price ${currHigh.toFixed(2)}`);
+                    console.log(`   Distance: ${highestNearPoint.index - bearishPreviousZone.index} candles`);
+                    console.log(`   Price Higher by ${priceDiff}%, RSI Lower by ${rsiDiff}`);
+                    console.log(`   Trend: Bull ✓ (maintained throughout)`);
+
+                    divergences.push({
+                      type: 'bearish',
+                      startIndex: bearishPreviousZone.index,
+                      endIndex: highestNearPoint.index,
+                      startTime: bearishPreviousZone.time,
+                      endTime: highestNearPoint.time,
+                      priceStart: prevHigh,
+                      priceEnd: currHigh,
+                      rsiStart: bearishPreviousZone.rsi,
+                      rsiEnd: highestNearPoint.rsi,
+                    });
+
+                    bearishActive = true;
+                    bearishDivPoint = highestNearPoint;
+
+                    // Reset
+                    bearishPreviousZone = null;
+                    bearishPreviousTrendType = null;
+                    bearishWaitingForNearZone = false;
+                  } else {
+                    console.log(`   → Price not diverging (${currHigh.toFixed(2)} <= ${prevHigh.toFixed(2)}) → Keep Zone 1, wait for next Zone 2`);
                   }
                 }
-
-                bearishPreviousZone = highestPoint;
-                bearishCurrentZone = [];
               }
+
+              bearishNearZone = [];
+            }
+
+            // Reset ถ้า RSI ลงต่ำกว่า 50 (ออกจากช่วง overbought โดยสิ้นเชิง)
+            if (bearishWaitingForNearZone && rsi < 50) {
+              console.log(`⚠️ RSI dropped below 50 → Reset Bearish Divergence tracking`);
+              bearishPreviousZone = null;
+              bearishPreviousTrendType = null;
+              bearishNearZone = [];
+              bearishWaitingForNearZone = false;
             }
           }
 
@@ -518,12 +731,23 @@ def build_chart_section() -> str:
           if (bearishActive) {
             state.strong_sell = 'Active';
 
-            if (zone.zone === 'orange') {
+            // ✅ เงื่อนไขการยืนยันการกลับตัว (Reversal Confirmation)
+            // 1. ต้องเข้า Orange Zone (downtrend confirmed)
+            // 2. RSI ต้องกลับมาต่ำกว่า 60 (แรงขายกลับมา)
+            if (zone.zone === 'orange' && rsi < 60) {
               state.special_signal = 'SELL';
               state.strong_sell = 'none-Active';
               bearishActive = false;
               bearishPreviousZone = null;
-              console.log(`🔔 Special SELL signal at index ${i}`);
+              console.log(`🔔 ✅ SELL SIGNAL CONFIRMED at index ${i}`);
+              console.log(`   RSI: ${rsi.toFixed(2)} (below 60 ✓)`);
+              console.log(`   Zone: Orange (downtrend ✓)`);
+            }
+            // ถ้ายังไม่เข้าเงื่อนไข ให้รอต่อ แต่ถ้า RSI ขึ้นเหนือ 70 อีกครั้ง → ยกเลิกสัญญาณ
+            else if (rsi > 70) {
+              console.log(`⚠️ RSI rose above 70 again → Cancel SELL signal (failed reversal)`);
+              bearishActive = false;
+              bearishPreviousZone = null;
             }
           }
 
@@ -536,13 +760,20 @@ def build_chart_section() -> str:
 
       // Draw divergence lines on RSI chart
       function drawDivergenceLines(divergences) {
+        if (!tvChart || !rsiSeries) {
+          console.warn("⚠️ Cannot draw divergence lines: chart or RSI series not ready");
+          return;
+        }
+
         // Clear existing lines
         divergenceLines.forEach(lineSeries => {
           tvChart.removeSeries(lineSeries);
         });
         divergenceLines = [];
 
-        // Draw new lines
+        // Draw new lines and markers on RSI panel
+        const rsiMarkers = [];
+
         divergences.forEach(div => {
           const lineColor = div.type === 'bullish' ? '#22c55e' : '#ef4444';
           const lineSeries = tvChart.addLineSeries({
@@ -563,9 +794,28 @@ def build_chart_section() -> str:
 
           lineSeries.setData(lineData);
           divergenceLines.push(lineSeries);
+
+          // Add markers to make divergence endpoints obvious
+          rsiMarkers.push({
+            time: div.startTime,
+            position: 'aboveBar',
+            color: lineColor,
+            shape: div.type === 'bullish' ? 'arrowUp' : 'arrowDown',
+            text: div.type === 'bullish' ? 'Bull Div' : 'Bear Div',
+          });
+          rsiMarkers.push({
+            time: div.endTime,
+            position: 'belowBar',
+            color: lineColor,
+            shape: div.type === 'bullish' ? 'arrowUp' : 'arrowDown',
+            text: div.type === 'bullish' ? 'Bull Div' : 'Bear Div',
+          });
         });
 
-        console.log(`📈 Drew ${divergences.length} divergence lines`);
+        // Attach markers to RSI series (clears old ones automatically)
+        rsiSeries.setMarkers(rsiMarkers);
+
+        console.log(`📈 Drew ${divergences.length} divergence lines (markers: ${rsiMarkers.length})`);
       }
 
       function initChart() {
@@ -2915,11 +3165,15 @@ def build_chart_section() -> str:
 
             console.log(`📊 Candles for RSI: ${candlesForRSI.length}, RSI values: ${rsiDataPoints.length}`);
 
-            const divergenceResult = detectDivergence(candlesForRSI, rsiDataPoints, zoneDataForRSI);
-            detectedDivergences = divergenceResult.divergences;
-            candleStates = divergenceResult.candleStates;
-            drawDivergenceLines(divergenceResult.divergences);
-            console.log(`🔍 Detected ${divergenceResult.divergences.length} divergences:`, divergenceResult.divergences);
+            // Extra safety: guard against unexpected undefined from detectDivergence
+            const divergenceResult = detectDivergence(candlesForRSI, rsiDataPoints, zoneDataForRSI) || {
+              divergences: [],
+              candleStates: [],
+            };
+            detectedDivergences = divergenceResult.divergences || [];
+            candleStates = divergenceResult.candleStates || [];
+            drawDivergenceLines(detectedDivergences);
+            console.log(`🔍 Detected ${detectedDivergences.length} divergences:`, detectedDivergences);
           }
 
           // Store candle data for tooltips

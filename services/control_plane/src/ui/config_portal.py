@@ -157,18 +157,19 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
         <div class="panel">
           <h2>💾 บันทึก/แก้ไข Config</h2>
         <form id="config-form">
-          <div class="two-col">
-            <div class="field">
-              <label for="pair">Trading Pair</label>
-              <input type="text" id="pair" name="pair" list="pair-options" placeholder="เช่น BTC/THB" required />
-            </div>
-            <div class="field">
-              <label for="pair-select" style="font-weight:500;">โหลดจากคู่ที่มี</label>
-              <select id="pair-select">
-                <option value="">เลือก pair ที่มี</option>
-                {pairs_html}
-              </select>
-            </div>
+          <div class="field">
+            <label for="pair">Trading Pair <span style="color: red;">*</span></label>
+            <input type="text" id="pair" name="pair" list="pair-options" placeholder="พิมพ์ เช่น BTC/USDT, ETH/USDT" required />
+            <div class="helper">รูปแบบ: BASE/QUOTE เช่น BTC/USDT (ต้องมี /)</div>
+          </div>
+
+          <div class="field">
+            <label for="pair-select" style="font-weight:400; color: #6b7280;">⚡ Shortcut: โหลดจาก config ที่บันทึกไว้ (ไม่บังคับ)</label>
+            <select id="pair-select">
+              <option value="">-- เลือกเพื่อโหลด config เก่า (optional) --</option>
+              {pairs_html}
+            </select>
+            <div class="helper">เลือกคู่ที่มีอยู่แล้วเพื่อโหลดค่า config มาแก้ไข</div>
           </div>
           <datalist id="pair-options">
             {pair_suggestions_html}
@@ -181,9 +182,9 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
           </div>
 
           <div class="field">
-            <label for="budget_pct">Budget % ต่อการเทรด (เช่น 0.5 = 0.5%) <span class="tooltip">?<span>เปอร์เซ็นต์ของพอร์ตที่ยอมใช้ต่อดีล ตัวอย่าง 0.5 = 0.5% หรือ 0.8 = 0.8%</span></span></label>
-            <input type="number" step="0.1" id="budget_pct" name="budget_pct" list="budget-options" value="0.5" required />
-            <div class="helper">CDC Zone จำกัดไม่เกิน 1% ต่อดีล เพื่อป้องกัน drawdown</div>
+            <label for="budget_pct">💰 Budget % ต่อการเทรด (เงินที่ลงทุนจริง) <span class="tooltip">?<span>% ของ port ที่จะลงทุนในแต่ละ trade<br>ตัวอย่าง: Port 10,000 บาท + Budget 2% = ลง 200 บาท/trade</span></span></label>
+            <input type="number" step="0.1" id="budget_pct" name="budget_pct" list="budget-options" value="0.5" min="0.1" max="20" required />
+            <div class="helper">⚡ ต้องการลง 20% ของ port → ใส่ 20 (จำกัดไม่เกิน 20% เพื่อความปลอดภัย)</div>
           </div>
           <datalist id="budget-options">
             {budget_options_html}
@@ -195,11 +196,37 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
           </div>
 
           <div class="section-title">Risk Settings</div>
+
+          <!-- Educational box explaining the difference -->
+          <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 12px; margin-bottom: 16px; font-size: 13px; line-height: 1.6;">
+            <div style="font-weight: 600; margin-bottom: 8px; color: #856404;">📚 ความแตกต่างระหว่าง Budget % และ Per Trade Cap %</div>
+            <div style="margin-bottom: 8px;">
+              <strong style="color: #0066cc;">Budget % (ด้านบน)</strong> = เงินที่คุณต้องการลงทุนจริงต่อ trade<br>
+              <span style="color: #666;">ตัวอย่าง: Port 10,000 บาท + Budget 20% = ต้องการลง 2,000 บาท/trade</span>
+            </div>
+            <div style="margin-bottom: 8px;">
+              <strong style="color: #dc3545;">Per Trade Cap % (ด้านล่าง)</strong> = % ของ port ทั้งหมดที่ยอมเสี่ยงขาดทุน (ใช้คำนวณ position size)<br>
+              <span style="color: #666;">ตัวอย่าง: Port 10,000 + Per Trade Cap 2% = ยอมเสีย 200 บาท สูงสุด</span>
+            </div>
+            <div style="background: white; padding: 8px; border-radius: 3px; border-left: 3px solid #28a745; margin-top: 8px;">
+              <strong>ตัวอย่างการคำนวณ:</strong><br>
+              • Port = 10,000 บาท<br>
+              • Per Trade Cap % = 2% → ยอมเสีย 200 บาท สูงสุด<br>
+              • Entry = 100 บาท, Cutloss = 95 บาท (ห่าง 5 บาท)<br>
+              • Position Size = 200 ÷ 5 = <strong>40 หน่วย</strong><br>
+              • <strong>เงินที่ลงจริง = 40 × 100 = 4,000 บาท</strong> (ไม่ใช่ Budget %)<br>
+              • ถ้าโดน cutloss: ขาดทุน 40 × 5 = 200 บาท (2% ของ port)
+            </div>
+            <div style="margin-top: 8px; color: #856404;">
+              ⚠️ <strong>สำคัญ:</strong> Budget % กำหนดเงินลงทุน, Per Trade Cap % กำหนดความเสี่ยง
+            </div>
+          </div>
+
           <div class="two-col">
             <div class="field">
-              <label for="per_trade_cap_pct">Per Trade Cap % <span class="tooltip">?<span>สัดส่วนพอร์ตที่ยอมขาดทุนต่อดีล (ใช้คำนวณ position sizing กับระยะ cutloss)</span></span></label>
+              <label for="per_trade_cap_pct">🛡️ Per Trade Cap % (ความเสี่ยงสูงสุด) <span class="tooltip">?<span>% ของพอร์ตทั้งหมดที่ยอมขาดทุนต่อ trade<br>ใช้คำนวณ Position Size ตามระยะห่าง Entry-Cutloss</span></span></label>
               <input type="number" step="0.01" id="per_trade_cap_pct" list="risk-options" value="2" />
-              <div class="helper">เช่น 2 = 2% ของพอร์ต ใช้สูตร Position Size = (RiskAmount)/(Entry-Cutloss)</div>
+              <div class="helper">⚡ แนะนำ: 1-5% | ตัวอย่าง: Port 10,000 + ใส่ 2 = ยอมเสีย 200 บาท สูงสุด</div>
             </div>
           </div>
           <datalist id="risk-options">

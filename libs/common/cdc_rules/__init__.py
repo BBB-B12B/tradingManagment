@@ -5,6 +5,8 @@ This library implements the 4 core rules for CDC Zone Bot:
 2. Leading Red exists in LTF within window
 3. Leading Signal (momentum flip AND higher low)
 4. Pattern = W-shape or NONE (NOT V-shape)
+
+Plus RSI Divergence detection for enhanced signal quality.
 """
 
 from __future__ import annotations
@@ -32,6 +34,14 @@ from .pattern_classifier import (
     check_v_shape,
 )
 
+# Divergence detection
+from .divergence import (
+    DivergenceType,
+    DivergenceSignal,
+    DivergenceDetector,
+    calculate_rsi,
+)
+
 # Main engine
 from .rule_engine import evaluate_all_rules, AllRulesResult
 
@@ -52,6 +62,11 @@ __all__ = [
     "classify_pattern",
     "check_w_shape",
     "check_v_shape",
+    # Divergence
+    "DivergenceType",
+    "DivergenceSignal",
+    "DivergenceDetector",
+    "calculate_rsi",
     # Main engine
     "evaluate_all_rules",
     "AllRulesResult",

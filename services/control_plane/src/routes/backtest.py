@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from httpx import HTTPStatusError
 
 from clients.binance_th_client import BinanceTHClient
-from libs.common.cdc_rules import evaluate_all_rules
+from libs.common.cdc_rules import evaluate_all_rules, DivergenceDetector, DivergenceType
 from libs.common.cdc_rules.types import Candle, CDCColor
 from libs.common.cdc_rules.pattern_classifier import classify_pattern
 from routes.config import _db as config_store
@@ -87,16 +87,38 @@ def _compute_rsi(closes: List[float], period: int = 14) -> List[Optional[float]]
 
 
 def _detect_strong_signals(decorated_rows: List[dict], rsi_values: List[Optional[float]]) -> List[dict]:
-    """Detect Strong_Buy / Strong_Sell (RSI divergence + zone trigger) to mirror chart."""
+    """
+    Detect Strong_Buy / Strong_Sell using unified divergence detection.
+
+    Uses the same logic as app.py JavaScript implementation:
+    - Zone 1: RSI < 30 or > 70
+    - Zone 2: RSI <= 35 or >= 65
+    - Minimum distance: 10 candles
+    - Dynamic Zone 1 updates
+    - Reversal confirmation (Blue zone + RSI > 40 for BUY, Orange zone + RSI < 60 for SELL)
+    """
     states: List[dict] = []
 
-    bullish_current: List[dict] = []
-    bullish_prev: Optional[dict] = None
-    bullish_active = False
+    # Prepare data for divergence detector
+    rsi_clean = [r if r is not None else 50.0 for r in rsi_values]
+    lows = [row.get("low", row.get("close", 0.0)) for row in decorated_rows]
+    highs = [row.get("high", row.get("close", 0.0)) for row in decorated_rows]
+    trends = [row.get("ema_fast", 0.0) > row.get("ema_slow", 0.0) for row in decorated_rows]
 
-    bearish_current: List[dict] = []
-    bearish_prev: Optional[dict] = None
+    # Detect all divergences
+    detector = DivergenceDetector()
+    divergences = detector.detect(rsi_clean, lows, highs, trends)
+
+    # Create divergence lookup by end index
+    div_by_end_idx = {}
+    for div in divergences:
+        div_by_end_idx[div.end_index] = div
+
+    # Track active signals
+    bullish_active = False
+    bullish_div_idx: Optional[int] = None
     bearish_active = False
+    bearish_div_idx: Optional[int] = None
 
     for i, row in enumerate(decorated_rows):
         rsi = rsi_values[i] if i < len(rsi_values) else None
@@ -108,74 +130,81 @@ def _detect_strong_signals(decorated_rows: List[dict], rsi_values: List[Optional
             "special_signal": None,
             "cutloss": None,
         }
+
         if rsi is None:
             states.append(state)
             continue
 
         zone = row.get("action_zone")
-        ema_fast = row.get("ema_fast", 0.0)
-        ema_slow = row.get("ema_slow", 0.0)
-        is_bullish = ema_fast > ema_slow
 
-        # Bullish divergence path (oversold <30)
-        if not bullish_active:
-            if rsi < 30:
-                bullish_current.append({"index": i, "time": row.get("timestamp"), "rsi": rsi, "price": row.get("low")})
-            else:
-                if bullish_current:
-                    lowest = min(bullish_current, key=lambda p: p["rsi"])
-                    if bullish_prev and lowest["rsi"] > bullish_prev["rsi"]:
-                        curr_low = min(p["price"] for p in bullish_current)
-                        prev_low = bullish_prev["price"]
-                        if curr_low < prev_low:
-                            bullish_active = True
-                    bullish_prev = lowest
-                    bullish_current = []
+        # Check if new divergence detected at this candle
+        if i in div_by_end_idx:
+            div = div_by_end_idx[i]
+            if div.type == DivergenceType.BULLISH:
+                bullish_active = True
+                bullish_div_idx = i
+            elif div.type == DivergenceType.BEARISH:
+                bearish_active = True
+                bearish_div_idx = i
+
+        # Bullish divergence: Wait for reversal confirmation
         if bullish_active:
             state["strong_buy"] = "Active"
-            if zone == "blue":
-                cutloss = row["close"] * 0.95
-                reds: List[float] = []
+
+            # Reversal confirmation: Blue zone + RSI > 40
+            if zone == "blue" and rsi > 40:
+                # Calculate cutloss using swing low
+                cutloss = row.get("low", row["close"])
                 lookback = 30
                 for j in range(i - 1, max(-1, i - lookback), -1):
                     if j < 0 or j >= len(decorated_rows):
                         continue
+                    low_j = decorated_rows[j].get("low", decorated_rows[j]["close"])
+                    if low_j < cutloss:
+                        cutloss = low_j
+
+                # Add safety buffer
+                cutloss = cutloss * 0.98
+
+                # Check for red zone (more conservative)
+                reds: List[float] = []
+                for j in range(i - 1, max(-1, i - lookback), -1):
+                    if j < 0 or j >= len(decorated_rows):
+                        continue
                     if decorated_rows[j].get("action_zone") == "red":
-                        reds.append(decorated_rows[j]["close"])
+                        reds.append(decorated_rows[j].get("low", decorated_rows[j]["close"]))
                     elif reds:
                         break
                 if reds:
-                    cutloss = min(reds)
-                elif i >= 2:
-                    cutloss = min(decorated_rows[i - 2]["close"], decorated_rows[i - 1]["close"])
+                    red_low = min(reds) * 0.98
+                    cutloss = min(cutloss, red_low)
 
                 state["special_signal"] = "BUY"
                 state["cutloss"] = cutloss
                 state["strong_buy"] = "none-Active"
                 bullish_active = False
-                bullish_prev = None
+                bullish_div_idx = None
 
-        # Bearish divergence path (overbought >70)
-        if not bearish_active:
-            if rsi > 70:
-                bearish_current.append({"index": i, "time": row.get("timestamp"), "rsi": rsi, "price": row.get("high")})
-            else:
-                if bearish_current:
-                    highest = max(bearish_current, key=lambda p: p["rsi"])
-                    if bearish_prev and highest["rsi"] < bearish_prev["rsi"]:
-                        curr_high = max(p["price"] for p in bearish_current)
-                        prev_high = bearish_prev["price"]
-                        if curr_high > prev_high and is_bullish:
-                            bearish_active = True
-                    bearish_prev = highest
-                    bearish_current = []
+            # Cancel if RSI drops below 30 again (failed reversal)
+            elif rsi < 30:
+                bullish_active = False
+                bullish_div_idx = None
+
+        # Bearish divergence: Wait for reversal confirmation
         if bearish_active:
             state["strong_sell"] = "Active"
-            if zone == "orange":
+
+            # Reversal confirmation: Orange zone + RSI < 60
+            if zone == "orange" and rsi < 60:
                 state["special_signal"] = "SELL"
                 state["strong_sell"] = "none-Active"
                 bearish_active = False
-                bearish_prev = None
+                bearish_div_idx = None
+
+            # Cancel if RSI rises above 70 again (failed reversal)
+            elif rsi > 70:
+                bearish_active = False
+                bearish_div_idx = None
 
         states.append(state)
 
@@ -307,6 +336,7 @@ def _run_backtest(
     enable_w_shape_filter: bool,
     enable_leading_signal: bool,
     initial_capital: float,
+    budget_pct: float,
     per_trade_cap_pct: float,
     use_trailing_stop: bool,
     wave_structures: List[dict],
@@ -325,12 +355,17 @@ def _run_backtest(
     htf_idx = 0
     equity = 1.0
 
+    # Track accumulated profit for compound calculation
+    # Formula: invested_amount = (initial_capital × budget_pct) + accumulated_profit
+    accumulated_profit: float = 0.0
+
     # Trailing Stop variables
     trailing_stop_price: Optional[float] = None
     trailing_stop_activated: bool = False
     trailing_stop_activation_price: Optional[float] = None
     prev_high: float = 0.0
     next_sl: Optional[float] = None  # Lagging indicator: SL to be used in NEXT candle
+    entry_trend_was_bullish: Optional[bool] = None  # Track trend at entry time
 
     for idx, candle in enumerate(candles_ltf):
         if idx < 2:
@@ -363,7 +398,11 @@ def _run_backtest(
             enable_leading_signal=enable_leading_signal,
         )
 
-        # Strong_Buy special signal entry (RSI divergence + blue zone)
+        # Track if divergence signal was used for entry (for priority system)
+        divergence_entry_taken = False
+
+        # PRIORITY 1: Strong_Buy special signal entry (RSI divergence + blue zone)
+        # This takes precedence over pattern-based entry (blue→green)
         if (
             not in_position
             and state
@@ -374,17 +413,24 @@ def _run_backtest(
             if position_cutloss is None or entry_price <= position_cutloss:
                 continue
 
-            # position sizing based on risk cap (ใช้ % พอร์ตตรง ๆ ไม่ผูกกับระยะ cutloss)
-            equity_value = equity * initial_capital
-            position_capital = equity_value * per_trade_cap_pct
+            # position sizing: (initial_capital × budget_pct) + accumulated_profit
+            # This compounds 100% of profit into next trade, not entire equity
+            base_investment = initial_capital * budget_pct
+            position_capital = base_investment + accumulated_profit
             units = position_capital / entry_price
             if position_capital <= 0 or units <= 0:
                 continue
 
             in_position = True
+            divergence_entry_taken = True  # Mark that divergence entry was used
             entry_time = candle.timestamp
             entry_rules = dict(rules_result.summary)
             position_units = units
+            # For divergence entries, use actual EMA values at entry time
+            entry_ema_fast = ltf_row.get("ema_fast", 0.0)
+            entry_ema_slow = ltf_row.get("ema_slow", 0.0)
+            entry_trend_was_bullish = entry_ema_fast > entry_ema_slow  # Save actual trend at entry
+            print(f"[BACKTEST DIVERGENCE] Entry at {candle.timestamp}: EMA Fast={entry_ema_fast:.2f}, Slow={entry_ema_slow:.2f}, Trend={'BULL' if entry_trend_was_bullish else 'BEAR'}")
 
             # Initialize Trailing Stop (only if enabled)
             if use_trailing_stop:
@@ -443,8 +489,10 @@ def _run_backtest(
             return cutloss_price
 
         # Entry check: blue → green + bull + not V-shape
+        # PRIORITY 2: Only enter via pattern if no divergence signal exists
         if (
             not in_position
+            and not divergence_entry_taken  # Skip if divergence entry already taken
             and prev2_zone == "blue"
             and prev_zone == "green"
             and is_bull
@@ -456,8 +504,9 @@ def _run_backtest(
                 if entry_price <= position_cutloss:
                     continue
 
-                equity_value = equity * initial_capital
-                position_capital = equity_value * per_trade_cap_pct
+                # position sizing: (initial_capital × budget_pct) + accumulated_profit
+                base_investment = initial_capital * budget_pct
+                position_capital = base_investment + accumulated_profit
                 units = position_capital / entry_price
                 if position_capital <= 0 or units <= 0:
                     continue
@@ -466,6 +515,7 @@ def _run_backtest(
                 entry_time = candle.timestamp
                 entry_rules = dict(rules_result.summary)
                 position_units = units
+                entry_trend_was_bullish = is_bull  # Save trend at entry
 
                 # Initialize Trailing Stop (only if enabled)
                 if use_trailing_stop:
@@ -508,14 +558,16 @@ def _run_backtest(
                 if entry_price <= position_cutloss:
                     continue
 
-                equity_value = equity * initial_capital
-                position_capital = equity_value * per_trade_cap_pct
+                # position sizing: (initial_capital × budget_pct) + accumulated_profit
+                base_investment = initial_capital * budget_pct
+                position_capital = base_investment + accumulated_profit
                 units = position_capital / entry_price
                 if position_capital <= 0 or units <= 0:
                     continue
 
                 in_position = True
                 position_units = units
+                entry_trend_was_bullish = is_bull  # Save trend at entry
 
                 # Initialize Trailing Stop
                 trailing_stop_price = position_cutloss
@@ -548,14 +600,25 @@ def _run_backtest(
             current_avg = (candle.open + candle.close) / 2  # Average price (matching app.js)
             current_low = candle.low
 
-            # Check if bullish trend ended (EMA crossover from Bull to Bear)
+            # Check if trend CHANGED from entry (EMA crossover)
             # This MUST be checked BEFORE activation and BEFORE stop update
-            # When trend reverses, exit immediately at close price (like in app.js)
+            # Only exit if trend actually reversed from what it was at entry
             ema_fast = ltf_row.get("ema_fast", 0.0)
             ema_slow = ltf_row.get("ema_slow", 0.0)
             is_bullish = ema_fast > ema_slow
 
-            if not is_bullish:
+            # Exit only if trend changed from entry trend
+            # If entered during Bear, wait for Bull then back to Bear
+            # If entered during Bull, exit when it becomes Bear
+            trend_reversed = False
+            if entry_trend_was_bullish and not is_bullish:
+                # Entered in Bull, now Bear → Exit
+                trend_reversed = True
+            elif not entry_trend_was_bullish and is_bullish:
+                # Entered in Bear, now Bull → Update entry trend, don't exit yet
+                entry_trend_was_bullish = True
+
+            if trend_reversed:
                 # Bullish trend ended, exit immediately
                 exit_price = ltf_row["close"]
                 exit_time = candle.timestamp
@@ -567,6 +630,9 @@ def _run_backtest(
                 duration_days = (exit_time - entry_time).total_seconds() / 86400 if entry_time else 0.0
                 equity_value = equity * initial_capital + pnl_amount
                 equity = equity_value / initial_capital
+
+                # Update accumulated profit for compounding
+                accumulated_profit += pnl_amount
 
                 trades.append(
                     {
@@ -600,6 +666,7 @@ def _run_backtest(
                 trailing_stop_activation_price = None
                 prev_high = 0.0
                 next_sl = None  # Reset lagging indicator
+                entry_trend_was_bullish = None  # Reset entry trend
                 continue
 
             # IMPORTANT: Check exit FIRST (before updating stop) to use PREVIOUS candle's SL
@@ -618,6 +685,9 @@ def _run_backtest(
                 equity_value = equity * initial_capital + pnl_amount
                 equity = equity_value / initial_capital
 
+                # Update accumulated profit for compounding
+                accumulated_profit += pnl_amount
+
                 trades.append(
                     {
                         "entry_time": entry_time.isoformat() if entry_time else "",
@@ -650,6 +720,7 @@ def _run_backtest(
                 trailing_stop_activation_price = None
                 prev_high = 0.0
                 next_sl = None  # Reset lagging indicator
+                entry_trend_was_bullish = None  # Reset entry trend
                 continue
 
             # After checking exit, NOW check activation and update SL for NEXT candle
@@ -717,6 +788,9 @@ def _run_backtest(
             equity_value = equity * initial_capital + pnl_amount
             equity = equity_value / initial_capital
 
+            # Update accumulated profit for compounding
+            accumulated_profit += pnl_amount
+
             trades.append(
                 {
                     "entry_time": entry_time.isoformat() if entry_time else "",
@@ -763,6 +837,9 @@ def _run_backtest(
             duration_days = (candle.timestamp - entry_time).total_seconds() / 86400 if entry_time else 0.0
             equity_value = equity * initial_capital + pnl_amount
             equity = equity_value / initial_capital
+
+            # Update accumulated profit for compounding
+            accumulated_profit += pnl_amount
 
             trades.append(
                 {
@@ -818,6 +895,10 @@ def _run_backtest(
             duration_days = (exit_time - entry_time).total_seconds() / 86400 if entry_time else 0.0
         equity_value = equity * initial_capital + pnl_amount
         equity = equity_value / initial_capital
+
+        # Update accumulated profit for compounding
+        accumulated_profit += pnl_amount
+
         trades.append(
             {
                 "entry_time": entry_time.isoformat(),
@@ -842,7 +923,7 @@ def _run_backtest(
     wins = len([t for t in trades if t["pnl_pct"] > 0])
     avg_return = sum(t["pnl_pct"] for t in trades) / total_trades if total_trades else 0.0
     final_equity_value = equity * initial_capital
-    total_income = final_equity_value - initial_capital
+    total_income = accumulated_profit  # Use accumulated_profit instead of equity-based calculation
     total_duration_days = sum(t.get("duration_days", 0) for t in trades)
     avg_duration_days = total_duration_days / total_trades if total_trades else 0.0
 
@@ -851,9 +932,10 @@ def _run_backtest(
     avg_capital_deployed = total_capital_deployed / total_trades if total_trades else 0.0
 
     # คำนวณ ROI (Return on Investment)
-    # = กำไร/ขาดทุนรวม / เงินลงทุนรวมทั้งหมด
-    if total_capital_deployed > 0:
-        roi_pct = (total_income / total_capital_deployed) * 100
+    # Formula: accumulated_profit / avg_capital_deployed
+    # This shows true ROI based on average investment per trade
+    if avg_capital_deployed > 0:
+        roi_pct = (accumulated_profit / avg_capital_deployed) * 100
     else:
         roi_pct = 0.0
 
@@ -964,6 +1046,7 @@ async def run_backtest(
         enable_w_shape_filter=cfg.enable_w_shape_filter,
         enable_leading_signal=cfg.enable_leading_signal,
         initial_capital=initial_capital,
+        budget_pct=cfg.budget_pct,
         per_trade_cap_pct=cfg.risk.per_trade_cap_pct,
         use_trailing_stop=use_trailing_stop,
         wave_structures=wave_structures,

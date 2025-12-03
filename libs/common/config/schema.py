@@ -21,7 +21,7 @@ class RuleParameters(BaseModel):
 class TradingConfiguration(BaseModel):
     pair: str
     timeframe: Literal["1h", "4h", "1d"]
-    budget_pct: float = Field(default=0.01, le=0.01, gt=0)
+    budget_pct: float = Field(default=0.01, le=0.20, gt=0, description="% ของ port ที่ลงทุนต่อ trade (ไม่เกิน 20%)")
     enable_w_shape_filter: bool = Field(default=True)
     enable_leading_signal: bool = Field(default=True)
     risk: RiskSettings = Field(default_factory=RiskSettings)

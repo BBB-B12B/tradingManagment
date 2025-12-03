@@ -4,9 +4,21 @@ from libs.common.config.schema import TradingConfiguration, RiskSettings
 
 
 def validate_config(cfg: TradingConfiguration) -> None:
-    if cfg.budget_pct > 0.01:
-        raise ValueError("budget_pct must be <= 1%")
+    # Budget % = เงินที่ลงทุนจริงต่อ trade (เช่น 0.2 = 20% ของ port)
+    if cfg.budget_pct > 0.20:
+        raise ValueError(
+            "⚠️ Budget % ต่อการเทรดสูงเกินไป!\n"
+            "คุณพยายามลง {:.1f}% ของ port ต่อ trade\n"
+            "จำกัดไว้ไม่เกิน 20% เพื่อความปลอดภัย\n"
+            "แนะนำ: 0.5-2% ต่อ trade".format(cfg.budget_pct * 100)
+        )
+
     risk: RiskSettings = cfg.risk
-    # Allow higher cap (เช่น 2% = 0.02) แต่จำกัดเพดานรวม 20% เพื่อป้องกันผิดพลาด
-    if risk.per_trade_cap_pct > 0.2:
-        raise ValueError("per_trade cap must be <= 20% (เช่น 2 = 2%)")
+    # Per Trade Cap % = เปอร์เซ็นต์ที่ยอมเสี่ยงขาดทุนต่อ trade (สำหรับคำนวณ position size)
+    if risk.per_trade_cap_pct > 0.20:
+        raise ValueError(
+            "⚠️ Per Trade Cap % สูงเกินไป!\n"
+            "คุณพยายามยอมเสี่ยงขาดทุน {:.1f}% ต่อ trade\n"
+            "จำกัดไว้ไม่เกิน 20% เพื่อความปลอดภัย\n"
+            "แนะนำ: 1-5% ต่อ trade".format(risk.per_trade_cap_pct * 100)
+        )
