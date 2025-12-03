@@ -216,6 +216,7 @@ def build_chart_section() -> str:
       let detectedDivergences = []; // Store detected divergences for display
       let candleStates = []; // Store Strong_Buy/Strong_Sell states for each candle
       let buyArrowMarkers = []; // Store BUY arrow positions for click detection
+      let trailingStopDataMap = new Map(); // timestamp -> trailing stop info (SL price, activation status)
 
       // Store multi-timeframe data globally for tooltip access
       let data1w = null;
@@ -902,6 +903,33 @@ def build_chart_section() -> str:
               html += `<div>Pattern: <b>${candle.pattern}</b></div>`;
             }
 
+            // Show Trailing Stop info if available
+            const tsInfo = trailingStopDataMap.get(timestamp);
+            if (tsInfo) {
+              const riskDistance = ((candle.close - tsInfo.slPrice) / candle.close * 100).toFixed(2);
+              const slColor = tsInfo.isActivated ? '#ef4444' : '#fb923c';
+              const slStatus = tsInfo.isActivated ? 'Active' : 'Calculating';
+              const slIcon = tsInfo.isActivated ? '🔴' : '🟠';
+              const slBg = tsInfo.isActivated ? '#fef2f2' : '#fff7ed';
+
+              html += `<div style="margin-top: 6px; padding: 6px; background: ${slBg}; border-left: 3px solid ${slColor}; font-size: 11px;">`;
+              html += `<div style="color: ${slColor}; font-weight: 600;">${slIcon} Trailing Stop (${slStatus})</div>`;
+              html += `<div>SL Price: <b>${tsInfo.slPrice.toFixed(2)}</b></div>`;
+              html += `<div>Risk Distance: <b>${riskDistance}%</b> from close</div>`;
+
+              if (tsInfo.unchanged) {
+                html += `<div style="color: #64748b; font-size: 10px; margin-top: 2px;">📌 Using SL from previous candle</div>`;
+              } else {
+                html += `<div style="color: #16a34a; font-size: 10px; margin-top: 2px;">📈 SL moved up this candle</div>`;
+              }
+
+              if (!tsInfo.isActivated) {
+                html += `<div style="color: #9ca3af; font-size: 10px; margin-top: 2px;">⏳ Waiting for activation threshold</div>`;
+              }
+
+              html += `</div>`;
+            }
+
             // Add validation checks - Check at 1D level (where patterns are detected)
             if (signalModeSelect.value === 'simple' && data1d && data1d.candles && data1d.candles.length >= 3) {
               // Find the corresponding 1D candle
@@ -1419,6 +1447,19 @@ def build_chart_section() -> str:
               console.warn('⚠️ Could not trace valid Wave structure from BUY arrow');
               console.log('📊 Using fallback: 7.5% profit activation for Trailing Stop');
 
+              // Check if clicking the same arrow again (toggle off)
+              if (window.activeTracedArrowTime === arrow.time) {
+                console.log(`ℹ️ Clicking same arrow again - hiding Trailing Stop`);
+
+                // Hide traced wave / Trailing Stop
+                if (window.tracedWaveSeries) {
+                  window.tracedWaveSeries.forEach(series => tvChart.removeSeries(series));
+                  window.tracedWaveSeries = [];
+                }
+                window.activeTracedArrowTime = null;
+                return;
+              }
+
               // Clear any previous traced wave
               if (window.tracedWaveSeries) {
                 window.tracedWaveSeries.forEach(series => tvChart.removeSeries(series));
@@ -1426,6 +1467,7 @@ def build_chart_section() -> str:
               }
 
               window.tracedWaveSeries = [];
+              window.activeTracedArrowTime = arrow.time; // Remember which arrow is active
 
               // Calculate Trailing Stop with 7.5% profit activation
               const entryTime = Math.floor(arrow.timestamp / 1000);
@@ -1722,10 +1764,10 @@ def build_chart_section() -> str:
           console.log(`   Activation Price: ${activationPrice}`);
         }
 
-        // Track previous candle's HIGH for calculating NEXT candle's SL
-        // Start from entry candle's high as the baseline
+        // Track previous candle's AVERAGE PRICE (Open + Close) / 2 for calculating NEXT candle's SL
+        // Start from entry candle's average as the baseline
         const entryCandle = candles1d[entryIndex];
-        let prevHigh = entryCandle ? entryCandle.high : entryPrice;
+        let prevAvg = entryCandle ? (entryCandle.open + entryCandle.close) / 2 : entryPrice;
         let nextSL = initialSL;  // SL to be used in NEXT candle
         let isActivated = activationPrice ? false : true; // If no activation price, always active
         let activationPoint = null;
@@ -1733,7 +1775,7 @@ def build_chart_section() -> str:
         // Scan each candle AFTER entry
         for (let i = entryIndex + 1; i < candles1d.length; i++) {
           const candle = candles1d[i];
-          const high = candle.high;
+          const avgPrice = (candle.open + candle.close) / 2;  // Average of open and close
           const low = candle.low;
 
           // IMPORTANT: Use SL calculated from PREVIOUS candle
@@ -1764,43 +1806,56 @@ def build_chart_section() -> str:
           }
 
           // Check if we should activate trailing stop
-          // Activation occurs when ENTIRE candle (OHLC) is above activation price + 5% buffer
-          // This means even the LOW is 5% above activation - candle is clearly above the line
-          const activationThreshold = activationPrice * 1.05; // 105% of activation price
+          // Activation occurs when candle's LOW is above 105% of activation price (Fibo level)
+          // This ensures price has clearly broken above the activation level with buffer
+          const activationThreshold = activationPrice * 1.05; // 105% of Fibo activation price
           if (!isActivated && activationPrice && candle.low >= activationThreshold) {
             isActivated = true;
             activationPoint = {
               time: Math.floor(candle.open_time / 1000),
               price: activationPrice,
             };
-            console.log(`🎯 Trailing Stop ACTIVATED at candle ${i}: Entire candle above 105% threshold (Low: ${candle.low} >= ${activationThreshold.toFixed(2)} [105% of ${activationPrice}])`);
+            console.log(`🎯 Trailing Stop ACTIVATED at candle ${i}: Low above 105% of Fibo (Low: ${candle.low} >= ${activationThreshold.toFixed(2)} [105% of ${activationPrice}])`);
           }
 
           // After checking exit, NOW calculate SL for NEXT candle
-          // ALWAYS calculate (not just when activated) so it follows price
-          // Trailing Stop should only move up when price makes NEW HIGH
-          // Use HIGH instead of average to track new highs
+          // ALWAYS calculate based on current price - NOT just when making new highs
+          // This allows SL to adjust during pullbacks and consolidation while trending up
+          // Trailing Stop uses FIXED DISTANCE from current average price
 
-          // Check if current candle made a new high
-          if (high > prevHigh) {
-            // New high achieved! Calculate incremental gain
-            const incrementalGain = high - prevHigh;
-            const newSL = nextSL + incrementalGain;
+          // Calculate SL as fixed percentage below current average price
+          // Distance: 7% below current price (adjustable)
+          const trailingDistance = 0.07; // 7% trailing distance
+          const potentialSL = avgPrice * (1 - trailingDistance);
 
-            // Trailing Stop can only rise, never fall
-            if (newSL > nextSL) {
-              nextSL = newSL;
-              trailingStops.push({
-                time: Math.floor(candle.open_time / 1000),
-                price: nextSL,
-                isActivated: isActivated,  // Store activation state
-              });
-            }
+          // Trailing Stop can only rise, never fall
+          // This ensures we lock in profits as price moves up
+          if (potentialSL > nextSL) {
+            nextSL = potentialSL;
 
-            // Update previous high for next comparison
-            prevHigh = high;
+            // Calculate how much price moved since last update
+            const priceChange = avgPrice - prevAvg;
+            const priceChangePercent = prevAvg > 0 ? (priceChange / prevAvg * 100) : 0;
+
+            trailingStops.push({
+              time: Math.floor(candle.open_time / 1000),
+              price: nextSL,
+              isActivated: isActivated,  // Store activation state
+            });
+
+            console.log(`📊 Candle ${i}: Price ${avgPrice.toFixed(2)} (${priceChangePercent >= 0 ? '+' : ''}${priceChangePercent.toFixed(2)}%), SL → ${nextSL.toFixed(2)} (${(trailingDistance * 100).toFixed(1)}% below)`);
+          } else {
+            // SL didn't move, but still record it for tooltip (using previous SL)
+            trailingStops.push({
+              time: Math.floor(candle.open_time / 1000),
+              price: nextSL,
+              isActivated: isActivated,
+              unchanged: true,  // Mark that SL didn't change
+            });
           }
-          // If no new high, prevHigh stays the same (keeps previous high)
+
+          // Always update prevAvg to track price movement
+          prevAvg = avgPrice;
         }
 
         console.log(`📈 Trailing Stop calculated: ${trailingStops.length} updates, Final SL: ${currentSL}`);
@@ -1846,7 +1901,16 @@ def build_chart_section() -> str:
 
         if (ts.trailingStops && ts.trailingStops.length > 0) {
           ts.trailingStops.forEach(update => {
-            slUpdates.set(update.time, { price: update.price, isActivated: update.isActivated });
+            slUpdates.set(update.time, { price: update.price, isActivated: update.isActivated, unchanged: update.unchanged });
+
+            // Store in global map for tooltip access
+            trailingStopDataMap.set(update.time * 1000, {
+              slPrice: update.price,
+              isActivated: update.isActivated,
+              unchanged: update.unchanged || false,
+              entryTime: entryTime,
+              initialSL: initialSL,
+            });
           });
         }
 
@@ -1869,10 +1933,25 @@ def build_chart_section() -> str:
           }
 
           // Check if SL updated at this candle
+          let slChanged = false;
           if (slUpdates.has(candleTime)) {
             const update = slUpdates.get(candleTime);
+            const previousSL = currentSL;
             currentSL = update.price;
             isActivated = update.isActivated;
+            slChanged = (currentSL !== previousSL);
+          }
+
+          // Store in global map for ALL candles (not just when SL changes)
+          // This ensures tooltip shows SL for every candle in the position
+          if (!trailingStopDataMap.has(candle.open_time)) {
+            trailingStopDataMap.set(candle.open_time, {
+              slPrice: currentSL,
+              isActivated: isActivated,
+              unchanged: !slChanged,
+              entryTime: entryTime,
+              initialSL: initialSL,
+            });
           }
 
           // Add to appropriate array based on activation state
@@ -2845,6 +2924,10 @@ def build_chart_section() -> str:
 
           // Store candle data for tooltips
           candleData = data.candles || [];
+
+          // Clear previous maps
+          markerDataMap.clear();
+          trailingStopDataMap.clear();
 
           // Clear previous zone series
           clearZoneSeries();

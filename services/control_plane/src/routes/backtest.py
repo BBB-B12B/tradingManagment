@@ -411,7 +411,7 @@ def _run_backtest(
                     trailing_stop_activation_price = entry_price * 1.075
                     print(f"[BACKTEST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (7.5% fallback - no wave)")
 
-                prev_high = candle.high
+                prev_high = (candle.open + candle.close) / 2  # Initialize with average price
             continue
 
         # Historical path mirrors chart fallback when lower-TF data is missing
@@ -492,7 +492,7 @@ def _run_backtest(
                         trailing_stop_activation_price = entry_price * 1.075
                         print(f"[BACKTEST PATH2] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (7.5% fallback - no wave)")
 
-                    prev_high = candle.high
+                    prev_high = (candle.open + candle.close) / 2  # Initialize with average price
                 continue
 
             htf_row = _find_candle_at_or_before(decorated_htf, int(ltf_row["open_time"]))
@@ -541,11 +541,11 @@ def _run_backtest(
                     trailing_stop_activation_price = entry_price * 1.075
                     print(f"[BACKTEST PATH2-HIST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (7.5% fallback - no wave)")
 
-                prev_high = candle.high
+                prev_high = (candle.open + candle.close) / 2  # Initialize with average price
 
         # Update Trailing Stop while in position (only if enabled)
         if in_position and use_trailing_stop and trailing_stop_price is not None:
-            current_high = candle.high
+            current_avg = (candle.open + candle.close) / 2  # Average price (matching app.js)
             current_low = candle.low
 
             # Check if bullish trend ended (EMA crossover from Bull to Bear)
@@ -660,26 +660,30 @@ def _run_backtest(
                     trailing_stop_activated = True
                     print(f"[BACKTEST] Trailing Stop ACTIVATED at {candle.timestamp}: Low={current_low:.2f} >= Threshold={activation_threshold:.2f}")
 
-            # Update trailing stop if price makes new high
+            # Update trailing stop based on current average price
             # ALWAYS calculate (like in app.js), not just when activated
             # The activation flag only controls whether we EXIT, not whether we calculate
-            if current_high > prev_high:
-                # New high achieved! Calculate incremental gain
-                incremental_gain = current_high - prev_high
-                new_stop = next_sl + incremental_gain  # Calculate from next_sl, not trailing_stop_price
+            # Use FIXED DISTANCE (7%) from current average price (matching app.js)
 
-                # Trailing Stop can only rise, never fall
-                if new_stop > next_sl:
-                    old_stop = next_sl
-                    next_sl = new_stop  # Update next_sl to be used in NEXT candle
-                    trailing_stop_price = new_stop  # Also update trailing_stop_price for backward compatibility
-                    if trailing_stop_activated:
-                        print(f"[BACKTEST] Trailing Stop updated: {old_stop:.2f} -> {new_stop:.2f} (High: {current_high:.2f}) [will be used in NEXT candle]")
-                    else:
-                        print(f"[BACKTEST] Trailing Stop updated (pre-activation): {old_stop:.2f} -> {new_stop:.2f} (High: {current_high:.2f}) [will be used in NEXT candle]")
+            trailing_distance = 0.07  # 7% trailing distance (matching app.js)
+            potential_sl = current_avg * (1 - trailing_distance)
 
-                # Update prev_high for next comparison
-                prev_high = current_high
+            # Trailing Stop can only rise, never fall
+            if potential_sl > next_sl:
+                old_stop = next_sl
+                next_sl = potential_sl  # Update next_sl to be used in NEXT candle
+                trailing_stop_price = potential_sl  # Also update trailing_stop_price for backward compatibility
+
+                # Calculate price change percentage for logging
+                price_change_pct = ((current_avg - prev_high) / prev_high * 100) if prev_high > 0 else 0.0
+
+                if trailing_stop_activated:
+                    print(f"[BACKTEST] Trailing Stop updated: {old_stop:.2f} -> {potential_sl:.2f} (Avg Price: {current_avg:.2f}, {price_change_pct:+.2f}%) [will be used in NEXT candle]")
+                else:
+                    print(f"[BACKTEST] Trailing Stop updated (pre-activation): {old_stop:.2f} -> {potential_sl:.2f} (Avg Price: {current_avg:.2f}) [will be used in NEXT candle]")
+
+            # Always update prev_high to track price movement (even if SL didn't move)
+            prev_high = current_avg
 
         # Exit check: orange → red, close on lower TF (or LTF for historical)
         if (
