@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import time
 import json
-from typing import Dict
+import os
+from typing import Dict, Any
 
 # allow absolute imports for libs/
 import sys
 from pathlib import Path
+import httpx
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_DIR = Path(__file__).resolve().parent
@@ -15,11 +17,12 @@ for path in (REPO_ROOT, SRC_DIR):
     if str(path) not in sys.path:
         sys.path.append(str(path))
 
-from fastapi import FastAPI
+import ccxt
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci
+from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci, bot, order_sync
 from routes.config import _db as config_store, _load_configs_from_d1
 from telemetry.config_metrics import ConfigMetrics
 from telemetry.rule_metrics import RuleMetrics
@@ -27,10 +30,62 @@ from ui.dashboard import render_dashboard
 from ui.config_portal import render_config_portal
 from ui.layout import render_page
 from ui.backtest_view import render_backtest_view
+from ui.account_link import render_account_link
+from ui.bot_runner import render_bot_runner
 from reports.success_dashboard import build_success_dashboard
 from ui.report_views import render_report
 
 app = FastAPI(title="CDC Zone Control Plane")
+ENV_NAME = os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
+ENV_FILE = REPO_ROOT / ".env" / f".env.{ENV_NAME}"
+WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL", "http://localhost:8787")
+WORKER_TOKEN = os.getenv("CLOUDFLARE_WORKER_API_TOKEN", "")
+
+
+def _load_env_file(path: Path) -> bool:
+    """Lightweight .env loader (avoids new deps). Returns True if loaded."""
+    if not path.exists():
+        return False
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key and key not in os.environ:
+            os.environ[key.strip()] = value.strip()
+    return True
+
+
+ENV_LOADED = _load_env_file(ENV_FILE)
+
+
+def _make_testnet_client(api_key: str, api_secret: str) -> ccxt.binance:
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=400, detail="BINANCE_API_KEY/SECRET is required")
+    client = ccxt.binance({
+        "apiKey": api_key,
+        "secret": api_secret,
+        "options": {"defaultType": "spot"},
+    })
+    # Sandbox mode points to testnet.binance.vision for spot
+    client.set_sandbox_mode(True)
+    return client
+
+
+def _worker_headers() -> Dict[str, str]:
+    if WORKER_TOKEN:
+        return {"Authorization": f"Bearer {WORKER_TOKEN}"}
+    return {}
+
+
+def _post_order_to_worker(payload: Dict[str, Any]) -> None:
+    """Best-effort log order to worker/D1."""
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.post(f"{WORKER_URL}/orders", json=payload, headers=_worker_headers())
+            resp.raise_for_status()
+    except Exception as exc:  # pragma: no cover - logging only
+        print(f"[WARN] Failed to log order to worker: {exc}")
 
 
 @app.on_event("startup")
@@ -49,6 +104,8 @@ app.include_router(market.router)
 app.include_router(live_rules.router)
 app.include_router(backtest.router)
 app.include_router(fibonacci.router)
+app.include_router(bot.router)
+app.include_router(order_sync.router)
 
 config_metrics = ConfigMetrics()
 rule_metrics = RuleMetrics()
@@ -62,6 +119,14 @@ class RuleMetricRequest(BaseModel):
 class ConfigMetricRequest(BaseModel):
     duration_seconds: float
     success: bool = True
+
+
+class TestOrderRequest(BaseModel):
+    symbol: str = "BTC/USDT"
+    side: str = "buy"
+    amount: float = 0.0001
+    type: str = "market"
+    price: float | None = None
 
 
 @app.get("/", tags=["health"])
@@ -79,6 +144,110 @@ def record_rule_metric(payload: RuleMetricRequest) -> Dict[str, str]:
 def record_config_metric(payload: ConfigMetricRequest) -> Dict[str, str]:
     config_metrics.record(payload.duration_seconds, payload.success)
     return {"status": "recorded"}
+
+
+@app.post("/test/binance-order", tags=["test"])
+def test_binance_order(payload: TestOrderRequest) -> Dict[str, Any]:
+    """Send a tiny market order to Binance Testnet using env keys."""
+    api_key = os.getenv("BINANCE_API_KEY") or ""
+    api_secret = os.getenv("BINANCE_API_SECRET") or ""
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=400, detail="Missing BINANCE_API_KEY / BINANCE_API_SECRET (testnet HMAC key required)")
+
+    client = _make_testnet_client(api_key, api_secret)
+
+    symbol = payload.symbol.upper()
+    side = payload.side.lower()
+    amount = float(payload.amount)
+    order_type = payload.type.lower() if payload.type else "market"
+    price = float(payload.price) if payload.price is not None else None
+
+    if side not in {"buy", "sell"}:
+        raise HTTPException(status_code=400, detail="side must be 'buy' or 'sell'")
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be > 0")
+    if order_type not in {"market", "limit"}:
+        raise HTTPException(status_code=400, detail="type must be 'market' or 'limit'")
+    if order_type == "limit" and (price is None or price <= 0):
+        raise HTTPException(status_code=400, detail="price must be provided for limit orders")
+
+    try:
+        markets = client.load_markets()
+        if symbol not in markets:
+            raise HTTPException(status_code=400, detail=f"Symbol {symbol} not supported on Binance")
+        m = markets[symbol]
+        lot_filter = {}
+        for f in m.get("info", {}).get("filters", []):
+            if f.get("filterType") == "LOT_SIZE":
+                lot_filter = f
+                break
+        min_amount = float(lot_filter.get("minQty") or m["limits"]["amount"].get("min") or 0)
+        step_size = float(lot_filter.get("stepSize") or m["limits"]["amount"].get("step") or 0)
+        if amount < min_amount:
+            raise HTTPException(status_code=400, detail=f"Amount {amount} below min lot {min_amount}")
+        if step_size:
+            q = amount / step_size
+            if abs(q - round(q)) > 1e-8:
+                raise HTTPException(status_code=400, detail=f"Amount {amount} not aligned to step size {step_size}")
+        if price is None:
+            price = client.fetch_ticker(symbol)["last"] or client.price_to_precision(symbol, 1)
+        notional = price * amount
+        min_notional = m["limits"]["cost"]["min"] or 0
+        if min_notional and notional < min_notional:
+            raise HTTPException(status_code=400, detail=f"Notional {notional:.6f} below min {min_notional}")
+        # Ensure precision
+        amount = float(client.amount_to_precision(symbol, amount))
+
+        if order_type == "limit":
+            order = client.create_order(symbol=symbol, type="limit", side=side, amount=amount, price=price)
+        else:
+            order = client.create_order(symbol=symbol, type="market", side=side, amount=amount)
+        info = order.get("info") or {}
+        filled_qty = float(info.get("executedQty") or amount)
+        avg_price = None
+        try:
+            quote = float(info.get("cummulativeQuoteQty") or 0)
+            if filled_qty:
+                avg_price = quote / filled_qty
+        except Exception:
+            avg_price = None
+
+        worker_payload = {
+            "pair": symbol.upper(),
+            "order_type": "ENTRY" if side.lower() == "buy" else "EXIT",
+            "side": side.upper(),
+            "requested_qty": amount,
+            "filled_qty": filled_qty,
+            "avg_price": avg_price or price,
+            "order_id": info.get("orderId") or order.get("id"),
+            "status": info.get("status") or "UNKNOWN",
+            "entry_reason": "TEST_ENDPOINT",
+            "exit_reason": None,
+            "rule_1_cdc_green": False,
+            "rule_2_leading_red": False,
+            "rule_3_leading_signal": False,
+            "rule_4_pattern": False,
+            "entry_price": avg_price or price,
+            "exit_price": None,
+            "pnl": None,
+            "pnl_pct": None,
+            "w_low": None,
+            "sl_price": None,
+            "requested_at": info.get("transactTime"),
+            "filled_at": info.get("transactTime"),
+        }
+        _post_order_to_worker(worker_payload)
+
+        return {
+            "status": "ok",
+            "order_id": info.get("orderId") or order.get("id"),
+            "symbol": symbol,
+            "side": side,
+            "amount": order.get("amount") or amount,
+            "info": info,
+        }
+    except ccxt.BaseError as exc:
+        raise HTTPException(status_code=502, detail=f"Binance testnet error: {exc}") from exc
 
 
 @app.get("/dashboard", response_class=HTMLResponse, tags=["ui"])
@@ -1035,10 +1204,21 @@ def build_chart_section() -> str:
                 html += `</div>`;
               }
             } else if (marker.type === 'SELL') {
-              // SELL = EXIT signal (Long Only strategy)
+              // SELL = EXIT signal (Long Only strategy) - Multi-type support
+              const exitLabels = {
+                'TRAILING_STOP': { icon: '📈', label: 'Trailing Stop Exit', color: '#10b981', bg: '#f0fdf4' },
+                'DIVERGENCE': { icon: '⚠️', label: 'Divergence Exit', color: '#f59e0b', bg: '#fffbeb' },
+                'EMA_CROSS': { icon: '🔴', label: 'EMA Cross Exit', color: '#ef4444', bg: '#fef2f2' },
+                'STOP_LOSS': { icon: '🛑', label: 'Stop Loss', color: '#dc2626', bg: '#fef2f2' },
+              };
+
+              const exitInfo = marker.exit_reason && exitLabels[marker.exit_reason]
+                ? exitLabels[marker.exit_reason]
+                : exitLabels['EMA_CROSS'];
+
               if (marker.sellPrice) html += `<div>Exit Price: <b>${marker.sellPrice.toFixed(2)}</b></div>`;
-              html += `<div style="margin-top: 6px; padding: 6px; background: #fff7ed; border-left: 3px solid #f59e0b; font-size: 11px;">`;
-              html += `💡 <b>Exit Long Position</b> - ขายออกจากการถือ Long`;
+              html += `<div style="margin-top: 6px; padding: 6px; background: ${exitInfo.bg}; border-left: 3px solid ${exitInfo.color}; font-size: 11px;">`;
+              html += `${exitInfo.icon} <b>${exitInfo.label}</b> - ขายออกจากการถือ Long`;
               html += `</div>`;
 
               // Validation status - different for historical vs current
@@ -3174,6 +3354,84 @@ def build_chart_section() -> str:
             candleStates = divergenceResult.candleStates || [];
             drawDivergenceLines(detectedDivergences);
             console.log(`🔍 Detected ${detectedDivergences.length} divergences:`, detectedDivergences);
+            console.log(`📊 candleStates length: ${candleStates.length}`);
+
+            // ═══════════════════════════════════════════════════════════════════
+            // ENHANCED EXIT SIGNAL DETECTION
+            // Add exit_reason field to candleStates for multi-type exit signals
+            // ═══════════════════════════════════════════════════════════════════
+            console.log("🔍 Enhancing candleStates with multi-type exit signals...");
+            console.log(`📊 detectedDivergences: ${detectedDivergences.length}, candleStates: ${candleStates.length}`);
+
+            let lastBuyIndex = -1;
+            let buyPrice = 0;
+            let cutloss = 0;
+
+            candleStates.forEach((state, idx) => {
+              // Track BUY entries
+              if (state.special_signal === 'BUY') {
+                lastBuyIndex = idx;
+                buyPrice = candlesForRSI[idx]?.close || 0;
+                cutloss = state.cutloss || buyPrice * 0.95;
+                state.exit_reason = null; // BUY has no exit_reason
+                return;
+              }
+
+              // We're in a position if we found a BUY before
+              if (lastBuyIndex >= 0 && idx > lastBuyIndex) {
+                const candle = candlesForRSI[idx];
+                if (!candle) return;
+
+                // Priority order: Trailing Stop > Divergence > EMA Cross > Stop Loss
+
+                // 1. Check Trailing Stop (if trailingStopDataMap has data for this candle)
+                const tsInfo = trailingStopDataMap.get(candle.open_time);
+                if (tsInfo && tsInfo.isActivated && candle.low <= tsInfo.slPrice) {
+                  if (!state.special_signal) { // Don't override existing signals
+                    state.special_signal = 'SELL';
+                    state.exit_reason = 'TRAILING_STOP';
+                    state.exit_price = tsInfo.slPrice;
+                    console.log(`📈 Trailing Stop Exit at index ${idx}, price ${tsInfo.slPrice}`);
+                    lastBuyIndex = -1; // Reset position
+                    return;
+                  }
+                }
+
+                // 2. Check Bearish Divergence
+                const bearishDivAtThisCandle = detectedDivergences.find(
+                  div => div.type === 'bearish' && div.endIndex === idx
+                );
+                if (bearishDivAtThisCandle && !state.special_signal) {
+                  state.special_signal = 'SELL';
+                  state.exit_reason = 'DIVERGENCE';
+                  state.exit_price = candle.close;
+                  console.log(`⚠️ Divergence Exit at index ${idx}, price ${candle.close}`);
+                  lastBuyIndex = -1; // Reset position
+                  return;
+                }
+
+                // 3. EMA Cross Exit (already set by detectDivergence as 'SELL')
+                if (state.special_signal === 'SELL' && !state.exit_reason) {
+                  state.exit_reason = 'EMA_CROSS';
+                  state.exit_price = candle.close;
+                  console.log(`🔴 EMA Cross Exit at index ${idx}, price ${candle.close}`);
+                  lastBuyIndex = -1; // Reset position
+                  return;
+                }
+
+                // 4. Check Stop Loss
+                if (candle.low <= cutloss && !state.special_signal) {
+                  state.special_signal = 'SELL';
+                  state.exit_reason = 'STOP_LOSS';
+                  state.exit_price = cutloss;
+                  console.log(`🛑 Stop Loss Exit at index ${idx}, price ${cutloss}`);
+                  lastBuyIndex = -1; // Reset position
+                  return;
+                }
+              }
+            });
+
+            console.log(`✅ Enhanced ${candleStates.length} candleStates with exit signals`);
           }
 
           // Store candle data for tooltips
@@ -3484,6 +3742,83 @@ def build_chart_section() -> str:
             console.log(`   BUY signals: ${buyCount}, SELL signals: ${sellCount}`);
             console.log(`🎯 BUY Arrow Markers stored: ${buyArrowMarkers.length}`, buyArrowMarkers);
 
+            // ═══════════════════════════════════════════════════════════════════
+            // ADD MULTI-TYPE EXIT SIGNALS FROM CANDLESTATES (SIMPLE MODE)
+            // Add markers for Trailing Stop, Divergence, EMA Cross, and Stop Loss
+            // ═══════════════════════════════════════════════════════════════════
+            console.log("📍 [Simple Mode] Adding multi-type exit signal markers from candleStates...");
+
+            const exitStylesSimple = {
+              'TRAILING_STOP': { color: '#10b981', text: '📈', label: 'Trailing Stop' },
+              'DIVERGENCE': { color: '#f59e0b', text: '⚠️', label: 'Divergence Exit' },
+              'EMA_CROSS': { color: '#ef4444', text: '🔴', label: 'EMA Cross' },
+              'STOP_LOSS': { color: '#dc2626', text: '🛑', label: 'Stop Loss' },
+            };
+
+            let addedExitMarkersSimple = 0;
+
+            if (candleStates && candleStates.length > 0) {
+              candleStates.forEach((state, stateIdx) => {
+                if (!state || !state.special_signal || state.special_signal !== 'SELL') return;
+                if (!state.exit_reason) return;
+
+                // Calculate actual candle index (add RSI offset = 14)
+                const candleIdx = stateIdx + 14;
+                if (candleIdx >= data.candles.length) return;
+
+                const candle = data.candles[candleIdx];
+                const t = typeof candle.open_time === "number" ? Math.floor(candle.open_time / 1000) : candle.open_time;
+
+                // Check if marker already exists for this time
+                const existingMarker = markers.find(m => m.time === t && m.shape === 'arrowDown');
+
+                const exitStyle = exitStylesSimple[state.exit_reason] || exitStylesSimple['EMA_CROSS'];
+
+                if (!existingMarker) {
+                  // Add new marker
+                  const marker = {
+                    time: t,
+                    position: 'aboveBar',
+                    color: exitStyle.color,
+                    shape: 'arrowDown',
+                    text: exitStyle.text,
+                  };
+
+                  markers.push(marker);
+                  addedExitMarkersSimple++;
+
+                  console.log(`📍 [Simple Mode] Added ${state.exit_reason} exit marker at candleIdx=${candleIdx}, time=${t}`);
+                } else {
+                  // Update existing marker with exit reason styling
+                  existingMarker.color = exitStyle.color;
+                  existingMarker.text = exitStyle.text;
+                  console.log(`📍 [Simple Mode] Updated existing marker to ${state.exit_reason} at candleIdx=${candleIdx}`);
+                }
+
+                // Update or add markerDataMap entry
+                const existingData = markerDataMap.get(candle.open_time);
+                if (existingData) {
+                  // Merge with existing data
+                  existingData.exit_reason = state.exit_reason;
+                  existingData.exitStyle = exitStyle;
+                  existingData.sellPrice = state.exit_price || existingData.sellPrice || candle.close;
+                } else {
+                  // Create new entry
+                  markerDataMap.set(candle.open_time, {
+                    type: 'SELL',
+                    exit_reason: state.exit_reason,
+                    sellPrice: state.exit_price || candle.close,
+                    exitStyle: exitStyle,
+                  });
+                }
+              });
+
+              console.log(`✅ [Simple Mode] Added/Updated ${addedExitMarkersSimple} exit markers from candleStates`);
+              console.log(`📊 Total markers after adding exit signals: ${markers.length}`);
+            } else {
+              console.log("⚠️ [Simple Mode] No candleStates available for multi-type exit signals");
+            }
+
           } else {
             // Advanced Mode: 2-candle pattern + Bull trend + all 4 rules must pass
             try {
@@ -3662,6 +3997,7 @@ def build_chart_section() -> str:
                       advanced: true,
                       isFakeSignal,
                       htfReason: htfValidation.reason,
+                      exit_reason: 'EMA_CROSS', // Default to EMA Cross for orange→red pattern
                     });
 
                     // Choose marker appearance based on HTF validation
@@ -3675,17 +4011,96 @@ def build_chart_section() -> str:
                         text: '⚠',
                       });
                     } else {
-                      // Valid signal: Red marker
+                      // Valid signal: Red marker (EMA Cross)
                       markers.push({
                         time: t,
                         position: 'aboveBar',
                         color: '#ef4444',
                         shape: 'arrowDown',
-                        text: '', // Empty - tooltip will show on hover
+                        text: '🔴', // EMA Cross icon
                       });
                     }
                   }
                 });
+
+                // ═══════════════════════════════════════════════════════════════════
+                // ADD ADDITIONAL EXIT SIGNALS FROM CANDLESTATES
+                // Add markers for Trailing Stop, Divergence, and Stop Loss exits
+                // that weren't captured by the orange→red pattern above
+                // ═══════════════════════════════════════════════════════════════════
+                console.log("📍 Adding multi-type exit signal markers from candleStates...");
+
+                const exitStyles = {
+                  'TRAILING_STOP': { color: '#10b981', text: '📈', label: 'Trailing Stop' },
+                  'DIVERGENCE': { color: '#f59e0b', text: '⚠️', label: 'Divergence Exit' },
+                  'EMA_CROSS': { color: '#ef4444', text: '🔴', label: 'EMA Cross' },
+                  'STOP_LOSS': { color: '#dc2626', text: '🛑', label: 'Stop Loss' },
+                };
+
+                let addedExitMarkers = 0;
+
+                if (candleStates && candleStates.length > 0) {
+                  candleStates.forEach((state, stateIdx) => {
+                    if (!state || !state.special_signal || state.special_signal !== 'SELL') return;
+                    if (!state.exit_reason) return;
+
+                    // Calculate actual candle index (add RSI offset = 14)
+                    const candleIdx = stateIdx + 14;
+                    if (candleIdx >= candlesForRSI.length) return;
+
+                    const candle = candlesForRSI[candleIdx];
+                    const t = typeof candle.open_time === "number" ? Math.floor(candle.open_time / 1000) : candle.open_time;
+
+                    // Check if marker already exists for this time
+                    const existingMarker = markers.find(m => m.time === t && m.shape === 'arrowDown');
+
+                    // Skip EMA_CROSS if already added by orange→red pattern detection
+                    if (state.exit_reason === 'EMA_CROSS' && existingMarker) {
+                      return; // Already added by pattern detection above
+                    }
+
+                    const exitStyle = exitStyles[state.exit_reason] || exitStyles['EMA_CROSS'];
+
+                    if (!existingMarker) {
+                      // Add new marker
+                      const marker = {
+                        time: t,
+                        position: 'aboveBar',
+                        color: exitStyle.color,
+                        shape: 'arrowDown',
+                        text: exitStyle.text,
+                      };
+
+                      markers.push(marker);
+                      addedExitMarkers++;
+
+                      console.log(`📍 Added ${state.exit_reason} exit marker at candleIdx=${candleIdx}, time=${t}`);
+                    }
+
+                    // Update or add markerDataMap entry
+                    const existingData = markerDataMap.get(candle.open_time);
+                    if (existingData) {
+                      // Merge with existing data (from orange→red pattern)
+                      existingData.exit_reason = state.exit_reason;
+                      existingData.exitStyle = exitStyle;
+                      existingData.sellPrice = state.exit_price || existingData.sellPrice || candle.close;
+                    } else {
+                      // Create new entry
+                      markerDataMap.set(candle.open_time, {
+                        type: 'SELL',
+                        exit_reason: state.exit_reason,
+                        sellPrice: state.exit_price || candle.close,
+                        exitStyle: exitStyle,
+                        advanced: true,
+                      });
+                    }
+                  });
+
+                  console.log(`✅ Added ${addedExitMarkers} additional exit markers from candleStates`);
+                } else {
+                  console.log("⚠️ No candleStates available for multi-type exit signals");
+                }
+
               } else {
                 console.warn("⚠️ Could not fetch historical rule evaluation, falling back to simple mode");
                 // Fallback to simple mode
@@ -3699,6 +4114,7 @@ def build_chart_section() -> str:
               return loadCandles(pair);
             }
           }
+
 
           // Draw Fibonacci wave objects FIRST to populate window.waveMarkers
           console.log("🌊 About to draw Fibonacci wave objects...");
@@ -3760,6 +4176,27 @@ def order_report_view() -> HTMLResponse:
     return HTMLResponse(render_page(inner, title="CDC Zone Orders Report"))
 
 
+@app.get("/ui/account-link", response_class=HTMLResponse, tags=["ui"])
+def account_link_ui() -> HTMLResponse:
+    """UI page for linking BinanceTH account keys."""
+    global ENV_LOADED
+    if not ENV_LOADED:
+        ENV_LOADED = _load_env_file(ENV_FILE)
+    api_key = os.getenv("BINANCE_API_KEY") or ""
+    api_secret = os.getenv("BINANCE_API_SECRET") or ""
+    status = {
+        "has_key": bool(api_key),
+        "has_secret": bool(api_secret),
+        "api_key_tail": api_key[-4:] if api_key else "",
+        "api_secret_tail": api_secret[-4:] if api_secret else "",
+        "env_name": ENV_NAME,
+        "env_file": str(ENV_FILE),
+        "env_loaded": ENV_LOADED,
+    }
+    body_html = render_account_link(status)
+    return HTMLResponse(render_page(body_html, title="ผูกบัญชี Binance"))
+
+
 @app.get("/ui/config", response_class=HTMLResponse, tags=["ui"])
 def config_portal() -> HTMLResponse:
     """Simple HTML UI for managing configurations."""
@@ -3775,3 +4212,10 @@ def backtest_ui() -> HTMLResponse:
     pairs = sorted(config_store.keys())
     body_html = render_backtest_view(pairs)
     return HTMLResponse(render_page(body_html, title="CDC Zone Backtest"))
+
+
+@app.get("/ui/bot", response_class=HTMLResponse, tags=["ui"])
+def bot_runner_ui() -> HTMLResponse:
+    pairs = sorted(config_store.keys())
+    body_html = render_bot_runner(pairs)
+    return HTMLResponse(render_page(body_html, title="Run Bot"))

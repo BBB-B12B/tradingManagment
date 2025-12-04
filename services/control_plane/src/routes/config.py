@@ -10,6 +10,7 @@ router = APIRouter(prefix="/config", tags=["config"])
 
 # Cloudflare Worker API URL
 CLOUDFLARE_WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL", "http://localhost:8787")
+CLOUDFLARE_WORKER_API_TOKEN = os.getenv("CLOUDFLARE_WORKER_API_TOKEN", "")
 
 # In-memory cache (for faster reads, synced with D1)
 _db: dict[str, TradingConfiguration] = {}
@@ -19,11 +20,21 @@ class ConfigRequest(BaseModel):
     config: TradingConfiguration
 
 
+def _auth_headers() -> dict[str, str]:
+    if CLOUDFLARE_WORKER_API_TOKEN:
+        return {"Authorization": f"Bearer {CLOUDFLARE_WORKER_API_TOKEN}"}
+    return {}
+
+
 async def _load_configs_from_d1():
     """Load all configs from D1 on startup"""
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{CLOUDFLARE_WORKER_URL}/config/list", timeout=5.0)
+            resp = await client.get(
+                f"{CLOUDFLARE_WORKER_URL}/config/list",
+                timeout=5.0,
+                headers=_auth_headers(),
+            )
             resp.raise_for_status()
             data = resp.json()
 
@@ -33,7 +44,8 @@ async def _load_configs_from_d1():
                     cfg_resp = await client.get(
                         f"{CLOUDFLARE_WORKER_URL}/config",
                         params={"pair": pair},
-                        timeout=5.0
+                        timeout=5.0,
+                        headers=_auth_headers(),
                     )
                     cfg_resp.raise_for_status()
                     cfg_data = cfg_resp.json()
@@ -51,7 +63,8 @@ async def _sync_config_to_d1(config: TradingConfiguration):
             resp = await client.post(
                 f"{CLOUDFLARE_WORKER_URL}/config",
                 json={"config": config.model_dump()},
-                timeout=10.0
+                timeout=10.0,
+                headers=_auth_headers(),
             )
             resp.raise_for_status()
     except Exception as e:
@@ -66,7 +79,8 @@ async def _delete_config_from_d1(pair: str):
             resp = await client.delete(
                 f"{CLOUDFLARE_WORKER_URL}/config",
                 params={"pair": pair},
-                timeout=5.0
+                timeout=5.0,
+                headers=_auth_headers(),
             )
             resp.raise_for_status()
     except Exception as e:

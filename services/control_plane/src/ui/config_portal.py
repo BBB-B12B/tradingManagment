@@ -144,7 +144,9 @@ def render_config_portal(configs: List[TradingConfiguration]) -> str:
       <h1>CDC Zone Control Plane</h1>
       <div class="nav-links">
         <a href="/dashboard">📊 Dashboard</a>
+        <a href="/ui/account-link">🔑 ผูกบัญชี</a>
         <a href="/ui/config">⚙️ Config</a>
+        <a href="/ui/bot">🚀 Run Bot</a>
         <a href="/ui/backtest">🧪 Backtest</a>
         <a href="/reports/success">✅ Success Report</a>
         <a href="/docs">📘 API Docs</a>

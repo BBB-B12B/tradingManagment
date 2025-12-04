@@ -4,7 +4,9 @@ from __future__ import annotations
 
 NAV_LINKS = [
     ("/dashboard", "📊 Dashboard"),
+    ("/ui/account-link", "🔑 ผูกบัญชี"),
     ("/ui/config", "⚙️ Config"),
+    ("/ui/bot", "🚀 Run Bot"),
     ("/ui/backtest", "🧪 Backtest"),
     ("/reports/success", "✅ Success Report"),
     ("/docs", "📘 API Docs"),

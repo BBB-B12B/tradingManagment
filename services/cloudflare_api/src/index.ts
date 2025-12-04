@@ -22,14 +22,14 @@ export interface Env {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const path = url.pathname;
+  const path = url.pathname;
 
-    // CORS headers
-    const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    };
+  // CORS headers
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
 
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
@@ -288,6 +288,31 @@ async function handleOrders(
     }, corsHeaders);
   }
 
+  // POST /orders/update - Update existing order status/quantities
+  if (path === '/orders/update' && method === 'POST') {
+    const body = await request.json() as any;
+    const { order_id, status, filled_qty, avg_price, exit_reason } = body;
+    if (!order_id) {
+      return jsonResponse({ error: 'order_id is required' }, corsHeaders, 400);
+    }
+    const existing = await env.CDC_DB.prepare(
+      'SELECT id FROM order_history WHERE order_id = ?'
+    ).bind(order_id).first();
+    if (!existing) {
+      return jsonResponse({ error: 'order not found' }, corsHeaders, 404);
+    }
+    await env.CDC_DB.prepare(
+      `UPDATE order_history
+       SET status = COALESCE(?, status),
+           filled_qty = COALESCE(?, filled_qty),
+           avg_price = COALESCE(?, avg_price),
+           exit_reason = COALESCE(?, exit_reason)
+       WHERE order_id = ?`
+    ).bind(status || null, filled_qty || null, avg_price || null, exit_reason || null, order_id).run();
+
+    return jsonResponse({ status: 'updated', order_id }, corsHeaders);
+  }
+
   return jsonResponse({ error: 'Method not allowed' }, corsHeaders, 405);
 }
 
@@ -397,6 +422,7 @@ async function handleConfigs(
     const config = {
       pair: result.pair,
       timeframe: result.timeframe,
+      budget_pct: result.budget_pct,
       enable_w_shape_filter: Boolean(result.enable_w_shape),
       enable_leading_signal: Boolean(result.enable_leading_signal),
       risk: JSON.parse(result.risk_json as string),
@@ -455,11 +481,12 @@ async function handleConfigs(
       // Update
       await env.CDC_DB.prepare(
         `UPDATE trading_configurations
-         SET timeframe = ?, enable_w_shape = ?, enable_leading_signal = ?,
+         SET timeframe = ?, budget_pct = ?, enable_w_shape = ?, enable_leading_signal = ?,
              risk_json = ?, rule_params_json = ?
          WHERE pair = ?`
       ).bind(
         config.timeframe || '1d',
+        (config.budget_pct ?? config.risk?.per_trade_cap_pct ?? 0.1),
         config.enable_w_shape_filter ? 1 : 0,
         config.enable_leading_signal ? 1 : 0,
         riskJson,
@@ -468,7 +495,7 @@ async function handleConfigs(
       ).run();
     } else {
       // Insert
-      const budgetPct = config.risk?.per_trade_cap_pct || 0.1;
+      const budgetPct = (config.budget_pct ?? config.risk?.per_trade_cap_pct ?? 0.1);
       await env.CDC_DB.prepare(
         `INSERT INTO trading_configurations
          (pair, timeframe, budget_pct, enable_w_shape, enable_leading_signal, risk_json, rule_params_json, created_at)
@@ -583,7 +610,8 @@ function authorizeRequest(
   env: Env,
   corsHeaders: Record<string, string>
 ): Response | null {
-  if (!env.API_TOKEN) {
+  // In dev environment, skip auth to simplify local testing
+  if (!env.API_TOKEN || (env.ENV || '').toLowerCase() === 'dev') {
     return null;
   }
 
