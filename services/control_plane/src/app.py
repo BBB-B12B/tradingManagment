@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci, bot, order_sync
+from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci, bot, order_sync, order_admin
 from routes.config import _db as config_store, _load_configs_from_d1
 from telemetry.config_metrics import ConfigMetrics
 from telemetry.rule_metrics import RuleMetrics
@@ -106,6 +106,8 @@ app.include_router(backtest.router)
 app.include_router(fibonacci.router)
 app.include_router(bot.router)
 app.include_router(order_sync.router)
+app.include_router(order_admin.router)
+app.add_api_route("/worker/orders", order_sync.fetch_worker_orders, methods=["GET"])
 
 config_metrics = ConfigMetrics()
 rule_metrics = RuleMetrics()

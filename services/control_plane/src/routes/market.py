@@ -17,6 +17,17 @@ router = APIRouter(prefix="/market", tags=["market"])
 _binance_client = BinanceTHClient()
 
 
+@router.get("/last")
+async def get_last_price(
+    pair: str = Query(..., description="Trading pair, e.g. BTC/THB or BTC/USDT"),
+    interval: str = Query("1h", description="Binance interval for reference, e.g. 1h, 4h, 1d"),
+) -> dict:
+    candles = await _binance_client.get_candles(pair=pair, interval=interval, limit=1)
+    if not candles:
+        raise HTTPException(status_code=404, detail="No price data")
+    return {"pair": pair.upper(), "price": candles[-1]["close"], "interval": interval}
+
+
 @router.get("/candles")
 async def get_candles(
     pair: str = Query(..., description="Trading pair, e.g. BTC/THB"),

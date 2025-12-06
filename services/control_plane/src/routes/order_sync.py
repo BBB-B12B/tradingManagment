@@ -34,6 +34,12 @@ def _make_client() -> ccxt.binance:
 
 
 async def _fetch_open_orders() -> List[Dict[str, Any]]:
+    data = await fetch_worker_orders()
+    return [o for o in data.get("orders", []) if (o.get("status") or "").upper() in {"NEW", "PARTIALLY_FILLED", "OPEN"}]
+
+
+async def fetch_worker_orders() -> Dict[str, Any]:
+    """Fetch all orders from worker (no filtering)."""
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(f"{WORKER_URL}/orders", headers=_auth_headers(), timeout=10.0)
         try:
@@ -41,8 +47,7 @@ async def _fetch_open_orders() -> List[Dict[str, Any]]:
         except httpx.HTTPStatusError as exc:
             detail = getattr(exc.response, "text", str(exc))
             raise HTTPException(status_code=502, detail=f"Worker /orders failed: {detail}") from exc
-        data = resp.json()
-        return [o for o in data.get("orders", []) if (o.get("status") or "").upper() in {"NEW", "PARTIALLY_FILLED", "OPEN"}]
+        return resp.json()
 
 
 async def _update_order(order_id: str, status: str, filled_qty: float | None, avg_price: float | None) -> None:
@@ -79,7 +84,15 @@ async def sync_orders() -> Dict[str, Any]:
             updated += 1
         except Exception as exc:  # pragma: no cover - network
             errors.append(f"{order_id}: {exc}")
+
+    # Optionally cancel if price far away (not implemented here; requires price context)
     return {"status": "ok", "updated": updated, "open_orders_checked": len(open_orders), "errors": errors}
+
+
+@router.get("/all")
+async def list_orders() -> Dict[str, Any]:
+    """Return all orders from worker (for UI table)."""
+    return await fetch_worker_orders()
 
 
 __all__ = ["router"]
