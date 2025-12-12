@@ -49,26 +49,32 @@ def render_bot_runner(pairs: List[str]) -> str:
     return f"""
     <style>{style}</style>
     <div class="bot-container">
-      <div class="card">
-        <h2>🚀 Run Bot</h2>
-        <p>รันบอทแบบ realtime: ใช้ logic เดียวกับ backtest แต่ประเมินสัญญาณจากข้อมูลปัจจุบัน (ไม่ไล่ย้อนหลัง) แล้วบันทึก ENTRY/EXIT ลง D1 ผ่าน worker</p>
-        <form id="bot-form" class="controls">
+      <div class="card" style="background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%); border: 2px solid #0ea5e9;">
+        <h2>🤖 Real-time Auto Trading</h2>
+        <p style="margin-bottom: 0.8rem; color: #475569;">ระบบเทรดอัตโนมัติ: ตรวจสอบเงื่อนไข Entry/Exit ทุก 1 นาที และส่ง Order ไปยัง D1 Worker</p>
+        <div class="controls" style="margin-bottom: 0.8rem;">
           <div class="form-field">
             <label for="pair">Pair</label>
             <select id="pair" name="pair">{options}</select>
           </div>
           <div class="form-field">
-            <label for="limit">จำนวนแท่งที่ใช้วิเคราะห์</label>
-            <input id="limit" name="limit" type="number" value="240" min="50" max="1000" />
+            <label for="interval">Interval (minutes)</label>
+            <input id="interval" name="interval" type="number" value="1" min="1" max="60" />
           </div>
-          <div class="form-field">
-            <label for="capital">เงินต้น (หน่วย quote)</label>
-            <input id="capital" name="capital" type="number" value="10000" min="0" step="1" />
-          </div>
-          <button class="btn-primary" type="submit" id="run-btn">▶️ Run Bot</button>
+        </div>
+        <div id="scheduler-status-card">
+          <p style="color: #64748b;">⏳ กำลังโหลดสถานะ...</p>
+        </div>
+        <div style="display: flex; gap: 0.7rem; margin-top: 0.8rem;">
+          <button class="btn-primary" type="button" id="start-scheduler-btn">▶️ Start Auto Trading</button>
+          <button class="btn-secondary" type="button" id="stop-scheduler-btn" style="background: #fef2f2; color: #b91c1c; border-color: #fca5a5;">⏹️ Stop</button>
+          <button class="btn-secondary" type="button" id="refresh-scheduler-btn">🔄 Refresh</button>
           <button class="btn-secondary" type="button" id="force-order-btn">⚡ Force Order</button>
-          <span id="status" class="status"></span>
-        </form>
+        </div>
+      </div>
+      <div class="card">
+        <h2>📜 Trading Log</h2>
+        <div id="log" class="log">รอการเริ่มต้น Auto Trading...</div>
       </div>
       <div id="force-modal" class="modal-backdrop">
         <div class="modal">
@@ -126,10 +132,7 @@ def render_bot_runner(pairs: List[str]) -> str:
       </div>
     </div>
     <script>
-      const form = document.getElementById("bot-form");
-      const statusEl = document.getElementById("status");
       const logEl = document.getElementById("log");
-      const runBtn = document.getElementById("run-btn");
       const forceBtn = document.getElementById("force-order-btn");
       const modal = document.getElementById("force-modal");
       const forceSubmit = document.getElementById("force-submit");
@@ -146,40 +149,6 @@ def render_bot_runner(pairs: List[str]) -> str:
         const timestamp = new Date().toLocaleTimeString();
         logEl.textContent = `[${{timestamp}}] ${{text}}\\n` + logEl.textContent;
       }}
-
-      form.addEventListener("submit", async (e) => {{
-        e.preventDefault();
-        const pair = document.getElementById("pair").value;
-        const limit = parseInt(document.getElementById("limit").value, 10);
-        const capital = parseFloat(document.getElementById("capital").value);
-        statusEl.textContent = "⏳ Running bot...";
-        statusEl.style.color = "#0f172a";
-        runBtn.disabled = true;
-        appendLog(`เริ่มรันบอทสำหรับ ${{pair}} (limit=${{limit}}, capital=${{capital}})`);
-        try {{
-          const resp = await fetch("/bot/run-live", {{
-            method: "POST",
-            headers: {{ "Content-Type": "application/json" }},
-            body: JSON.stringify({{ pair, limit, initial_capital: capital }})
-          }});
-          const data = await resp.json();
-          if (!resp.ok) {{
-            const detail = data?.detail ?? data;
-            const msg = typeof detail === "string" ? detail : JSON.stringify(detail);
-            throw new Error(msg);
-          }}
-          const mode = data.mode || "ENTRY/EXIT";
-          statusEl.textContent = `✅ สำเร็จ (${{mode}}) orders=${{data.orders_logged}}`;
-          statusEl.style.color = "#166534";
-          appendLog(`สำเร็จ (${{mode}}) orders=${{data.orders_logged}} balance=${{JSON.stringify(data.balance || {{}})}}`);
-        }} catch (err) {{
-          statusEl.textContent = "💥 " + err.message;
-          statusEl.style.color = "#b91c1c";
-          appendLog("ล้มเหลว: " + err.message);
-        }} finally {{
-          runBtn.disabled = false;
-        }}
-      }});
 
       function badge(status) {{
         const s = (status || "").toUpperCase();
@@ -299,6 +268,157 @@ def render_bot_runner(pairs: List[str]) -> str:
           appendLog("Force order fail: " + err.message);
         }}
       }});
+
+      // ===========================
+      // Scheduler Status Functions
+      // ===========================
+
+      const schedulerCard = document.getElementById("scheduler-status-card");
+      const startSchedulerBtn = document.getElementById("start-scheduler-btn");
+      const stopSchedulerBtn = document.getElementById("stop-scheduler-btn");
+      const refreshSchedulerBtn = document.getElementById("refresh-scheduler-btn");
+
+      function renderSchedulerStatus(data) {{
+        const isRunning = data.is_running || false;
+        const status = data.status || "not_initialized";
+        const pairs = data.pairs || [];
+        const interval = data.interval_minutes || 1;
+        const jobs = data.jobs || [];
+
+        let statusBadge = "";
+        let statusColor = "";
+        let statusIcon = "";
+
+        if (status === "running") {{
+          statusBadge = "🟢 RUNNING";
+          statusColor = "#166534";
+          statusIcon = "🟢";
+        }} else if (status === "stopped") {{
+          statusBadge = "🔴 STOPPED";
+          statusColor = "#b91c1c";
+          statusIcon = "🔴";
+        }} else {{
+          statusBadge = "⚪ NOT INITIALIZED";
+          statusColor = "#64748b";
+          statusIcon = "⚪";
+        }}
+
+        let nextRunInfo = "";
+        if (jobs.length > 0 && jobs[0].next_run) {{
+          const nextRun = new Date(jobs[0].next_run);
+          const now = new Date();
+          const diffSec = Math.floor((nextRun - now) / 1000);
+          const diffMin = Math.floor(diffSec / 60);
+          const diffSecRem = diffSec % 60;
+          nextRunInfo = `
+            <div style="margin-top: 0.5rem; padding: 0.5rem; background: #fff; border-radius: 6px; border-left: 3px solid #0ea5e9;">
+              <strong>⏱️ Next Run:</strong> ${{nextRun.toLocaleString()}}
+              <span style="color: #0ea5e9; font-weight: 600;">(in ${{diffMin}}m ${{diffSecRem}}s)</span>
+            </div>
+          `;
+        }}
+
+        const pairsDisplay = pairs.length > 0 ? pairs.join(", ") : "-";
+
+        schedulerCard.innerHTML = `
+          <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.8rem;">
+            <div>
+              <strong style="color: #64748b;">Status:</strong>
+              <div style="font-size: 1.1rem; font-weight: 700; color: ${{statusColor}}; margin-top: 0.2rem;">
+                ${{statusBadge}}
+              </div>
+            </div>
+            <div>
+              <strong style="color: #64748b;">Pairs:</strong>
+              <div style="font-size: 0.95rem; margin-top: 0.2rem; color: #0f172a;">
+                ${{pairsDisplay}}
+              </div>
+            </div>
+            <div>
+              <strong style="color: #64748b;">Interval:</strong>
+              <div style="font-size: 0.95rem; margin-top: 0.2rem; color: #0f172a;">
+                Every ${{interval}} minute(s)
+              </div>
+            </div>
+            <div>
+              <strong style="color: #64748b;">Jobs:</strong>
+              <div style="font-size: 0.95rem; margin-top: 0.2rem; color: #0f172a;">
+                ${{jobs.length}} active
+              </div>
+            </div>
+          </div>
+          ${{nextRunInfo}}
+        `;
+
+        // Update button states
+        startSchedulerBtn.disabled = isRunning;
+        stopSchedulerBtn.disabled = !isRunning;
+      }}
+
+      async function refreshSchedulerStatus() {{
+        try {{
+          const resp = await fetch("/bot/scheduler/status");
+          const data = await resp.json();
+          renderSchedulerStatus(data);
+        }} catch (err) {{
+          schedulerCard.innerHTML = `<p style="color: #b91c1c;">💥 Error: ${{err.message}}</p>`;
+        }}
+      }}
+
+      startSchedulerBtn.addEventListener("click", async () => {{
+        const pair = document.getElementById("pair").value;
+        const interval = parseInt(document.getElementById("interval").value, 10);
+        try {{
+          startSchedulerBtn.disabled = true;
+          appendLog(`🔄 Starting Auto Trading for ${{pair}} (every ${{interval}} minute(s))...`);
+          const resp = await fetch("/bot/scheduler/start", {{
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
+            body: JSON.stringify({{ pairs: [pair], interval_minutes: interval }})
+          }});
+          const data = await resp.json();
+          if (!resp.ok) {{
+            const detail = data?.detail ?? data;
+            const msg = typeof detail === "string" ? detail : JSON.stringify(detail);
+            throw new Error(msg);
+          }}
+          appendLog(`✅ Auto Trading started for ${{pair}} - checking every ${{interval}} minute(s)`);
+          await refreshSchedulerStatus();
+        }} catch (err) {{
+          alert("Failed to start auto trading: " + err.message);
+          appendLog("💥 Auto Trading start failed: " + err.message);
+          startSchedulerBtn.disabled = false;
+        }}
+      }});
+
+      stopSchedulerBtn.addEventListener("click", async () => {{
+        if (!confirm("ยืนยันหยุด Auto Trading?")) return;
+        try {{
+          stopSchedulerBtn.disabled = true;
+          appendLog("🔄 Stopping Auto Trading...");
+          const resp = await fetch("/bot/scheduler/stop", {{ method: "POST" }});
+          const data = await resp.json();
+          if (!resp.ok) {{
+            const detail = data?.detail ?? data;
+            const msg = typeof detail === "string" ? detail : JSON.stringify(detail);
+            throw new Error(msg);
+          }}
+          appendLog("⏹️ Auto Trading stopped successfully");
+          await refreshSchedulerStatus();
+        }} catch (err) {{
+          alert("Failed to stop auto trading: " + err.message);
+          appendLog("💥 Auto Trading stop failed: " + err.message);
+          stopSchedulerBtn.disabled = false;
+        }}
+      }});
+
+      refreshSchedulerBtn.addEventListener("click", refreshSchedulerStatus);
+
+      // Auto-refresh scheduler status every 10 seconds
+      setInterval(refreshSchedulerStatus, 10000);
+
+      // Initial load
+      refreshSchedulerStatus();
     </script>
     """
 

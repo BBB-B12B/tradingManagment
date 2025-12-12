@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import time
 import json
 import os
+import time
 from typing import Dict, Any
 
 # allow absolute imports for libs/
@@ -17,29 +17,9 @@ for path in (REPO_ROOT, SRC_DIR):
     if str(path) not in sys.path:
         sys.path.append(str(path))
 
-import ccxt
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-
-from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci, bot, order_sync, order_admin
-from routes.config import _db as config_store, _load_configs_from_d1
-from telemetry.config_metrics import ConfigMetrics
-from telemetry.rule_metrics import RuleMetrics
-from ui.dashboard import render_dashboard
-from ui.config_portal import render_config_portal
-from ui.layout import render_page
-from ui.backtest_view import render_backtest_view
-from ui.account_link import render_account_link
-from ui.bot_runner import render_bot_runner
-from reports.success_dashboard import build_success_dashboard
-from ui.report_views import render_report
-
-app = FastAPI(title="CDC Zone Control Plane")
+# Load environment as early as possible so downstream routers see the values
 ENV_NAME = os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
 ENV_FILE = REPO_ROOT / ".env" / f".env.{ENV_NAME}"
-WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL", "http://localhost:8787")
-WORKER_TOKEN = os.getenv("CLOUDFLARE_WORKER_API_TOKEN", "")
 
 
 def _load_env_file(path: Path) -> bool:
@@ -57,6 +37,31 @@ def _load_env_file(path: Path) -> bool:
 
 
 ENV_LOADED = _load_env_file(ENV_FILE)
+
+# Reload worker settings after env is loaded
+WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL", "http://localhost:8787")
+WORKER_TOKEN = os.getenv("CLOUDFLARE_WORKER_API_TOKEN", "")
+
+# Third-party imports (after env load for ccxt options)
+import ccxt
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+app = FastAPI(title="CDC Zone Control Plane")
+
+from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci, bot, order_sync, order_admin
+from routes.config import _db as config_store, _load_configs_from_d1
+from telemetry.config_metrics import ConfigMetrics
+from telemetry.rule_metrics import RuleMetrics
+from ui.dashboard import render_dashboard
+from ui.config_portal import render_config_portal
+from ui.layout import render_page
+from ui.backtest_view import render_backtest_view
+from ui.account_link import render_account_link
+from ui.bot_runner import render_bot_runner
+from reports.success_dashboard import build_success_dashboard
+from ui.report_views import render_report
 
 
 def _make_testnet_client(api_key: str, api_secret: str) -> ccxt.binance:

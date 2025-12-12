@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import ccxt
 
 from routes.config import _db as config_store
+from routes import order_sync
 from routes import backtest
 
 router = APIRouter(prefix="/bot", tags=["bot"])
@@ -20,6 +21,8 @@ _WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL", "http://localhost:8787")
 _WORKER_TOKEN = os.getenv("CLOUDFLARE_WORKER_API_TOKEN", "")
 _BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 _BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+# สำหรับบัญชีที่มี base เริ่มต้นค้างอยู่ (เช่น 1 BTC) ให้หักออกเมื่อประเมินโหมด ENTRY/EXIT
+_BASE_BALANCE_OFFSET = float(os.getenv("BASE_BALANCE_OFFSET", "1.0"))
 
 
 def _auth_headers() -> Dict[str, str]:
@@ -36,6 +39,90 @@ class LiveRunRequest(BaseModel):
     pair: str
     limit: int = 240
     initial_capital: float = 10000.0
+
+
+def _parse_float(val: Any) -> float:
+    try:
+        return float(val)
+    except Exception:
+        return 0.0
+
+
+def _executed_status(status: str) -> bool:
+    """Return True if status indicates an executed/partial order (not just NEW/OPEN)."""
+    s = (status or "").upper()
+    return s in {"FILLED", "CLOSED", "PARTIALLY_FILLED", "PARTIAL_FILL"}
+
+
+def _sort_key(order: Dict[str, Any]) -> str:
+    """Sort orders chronologically using filled/requested/created timestamps."""
+    for key in ("filled_at", "requested_at", "created_at"):
+        val = order.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
+def _compute_open_position(orders: list[Dict[str, Any]], pair: str) -> Dict[str, Any]:
+    """
+    Build net open position (qty + avg cost) from order history.
+    - Ignore canceled/rejected orders
+    - Process ENTRY then offset with EXIT in time order (FIFO)
+    - Keep remaining qty/cost only for legs that are not fully closed
+    """
+    pair_upper = pair.upper()
+    relevant = [o for o in orders if (o.get("pair") or "").upper() == pair_upper]
+    relevant.sort(key=_sort_key)
+
+    entry_queue: list[Dict[str, float]] = []
+    ignored_status = {"CANCELED", "REJECTED"}
+
+    def _consume_exit(qty: float) -> None:
+        nonlocal entry_queue
+        remaining = qty
+        new_queue: list[Dict[str, float]] = []
+        for leg in entry_queue:
+            if remaining <= 0:
+                new_queue.append(leg)
+                continue
+            if leg["qty"] > remaining:
+                # partially reduce this entry leg
+                leg["qty"] -= remaining
+                new_queue.append(leg)
+                remaining = 0
+            else:
+                # consume entire leg
+                remaining -= leg["qty"]
+        entry_queue = new_queue
+
+    for o in relevant:
+        status = (o.get("status") or "").upper()
+        if status in ignored_status:
+            continue
+
+        qty = _parse_float(o.get("filled_qty") if _executed_status(status) else o.get("filled_qty"))
+        # If filled_qty missing/zero but requested exists and status is FILLED/CLOSED, fall back
+        if qty <= 0 and _executed_status(status):
+            qty = _parse_float(o.get("requested_qty"))
+        price = _parse_float(o.get("avg_price") or o.get("entry_price"))
+
+        if (o.get("order_type") or "").upper() == "ENTRY":
+            if qty > 0:
+                entry_queue.append({"qty": qty, "price": price})
+        elif (o.get("order_type") or "").upper() == "EXIT":
+            if qty > 0:
+                _consume_exit(qty)
+
+    total_qty = sum(leg["qty"] for leg in entry_queue)
+    total_cost = sum(leg["qty"] * leg["price"] for leg in entry_queue)
+    avg_cost = total_cost / total_qty if total_qty > 0 else 0.0
+
+    return {
+        "qty": total_qty,
+        "avg_cost": avg_cost,
+        "legs": entry_queue,
+        "orders_used": len(relevant),
+    }
 
 
 def _make_ccxt_client() -> ccxt.binance:
@@ -187,8 +274,16 @@ async def run_live(payload: LiveRunRequest) -> Dict[str, Any]:
 
     client = _make_ccxt_client()
     bal = _get_balance_for_pair(client, pair)
+    # ใช้ประวัติ order ใน D1 เพื่อคำนวณโพสิชันที่ยังไม่ปิด/ไม่ขายหมด
+    orders_data = await order_sync.fetch_worker_orders()
+    position = _compute_open_position(orders_data.get("orders", []), pair)
     epsilon = 1e-8
-    has_position = bal["base"] > epsilon
+    effective_qty = position.get("qty", 0.0)
+    # ถ้า worker ไม่เหลือโพสิชัน แต่ balance base ยังมี ให้ถือว่ามีของเพื่อความปลอดภัย (หัก offset)
+    base_after_offset = max(bal["base"] - _BASE_BALANCE_OFFSET, 0.0)
+    if effective_qty <= epsilon and base_after_offset > epsilon:
+        effective_qty = base_after_offset
+    has_position = effective_qty > epsilon
 
     try:
         result = await backtest.run_backtest(
@@ -223,6 +318,14 @@ async def run_live(payload: LiveRunRequest) -> Dict[str, Any]:
 
     order_kind, trade = selected
     rules = trade.get("rules", {}) or {}
+    decision_reason = {
+        "mode": "EXIT" if has_position else "ENTRY",
+        "position_qty": position.get("qty", 0.0),
+        "effective_qty": effective_qty,
+        "avg_cost": position.get("avg_cost", 0.0),
+        "balance": bal,
+        "base_offset": _BASE_BALANCE_OFFSET,
+    }
     async with httpx.AsyncClient() as http_client:
         if order_kind == "ENTRY":
             qty = trade.get("position_units") or 0
@@ -253,7 +356,12 @@ async def run_live(payload: LiveRunRequest) -> Dict[str, Any]:
             await _post_order(http_client, payload_entry)
             orders_logged = 1
         else:
-            qty = trade.get("position_units") or 0
+            # ขายตามจำนวนที่เหลือเปิดอยู่ (ไม่เกินสัญญาณที่ได้จาก backtest)
+            signal_qty = trade.get("position_units") or 0
+            qty = min(effective_qty, signal_qty or effective_qty)
+            if qty <= 0:
+                raise HTTPException(status_code=400, detail="No open position to exit")
+            exit_reason = trade.get("exit_reason") or "CDC_EXIT"
             payload_exit = {
                 "pair": pair,
                 "order_type": "EXIT",
@@ -264,7 +372,7 @@ async def run_live(payload: LiveRunRequest) -> Dict[str, Any]:
                 "order_id": f"live-exit-{uuid.uuid4().hex[:8]}",
                 "status": "NEW",
                 "entry_reason": None,
-                "exit_reason": trade.get("exit_reason") or "TAKE_PROFIT",
+                "exit_reason": f"{exit_reason} | pos_qty={qty:.8f} | avg_cost={position.get('avg_cost', 0.0):.2f}",
                 "rule_1_cdc_green": bool(rules.get("rule_1_cdc_green")),
                 "rule_2_leading_red": bool(rules.get("rule_2_leading_red")),
                 "rule_3_leading_signal": bool(rules.get("rule_3_leading_signal")),
@@ -288,4 +396,103 @@ async def run_live(payload: LiveRunRequest) -> Dict[str, Any]:
         "orders_logged": orders_logged,
         "stats": stats,
         "balance": bal,
+        "position": position,
+        "decision": decision_reason,
+    }
+
+
+# ===========================
+# Real-time Trading Scheduler
+# ===========================
+
+from trading.scheduler import TradingScheduler
+
+# Global Scheduler Instance
+_trading_scheduler: Optional[TradingScheduler] = None
+
+
+class SchedulerStartRequest(BaseModel):
+    pairs: List[str]
+    interval_minutes: int = 1
+
+
+@router.post("/scheduler/start")
+async def start_scheduler(payload: SchedulerStartRequest) -> Dict[str, Any]:
+    """เริ่ม Real-time Trading Scheduler
+
+    Scheduler จะตรวจสอบเงื่อนไข Entry/Exit ทุก N นาทีสำหรับคู่เงินที่กำหนด
+
+    Args:
+        pairs: รายการคู่เงิน เช่น ["BTC/USDT", "ETH/USDT"]
+        interval_minutes: ตรวจสอบทุกกี่นาที (default: 1)
+
+    Returns:
+        Status และข้อมูล Scheduler
+    """
+    global _trading_scheduler
+
+    if _trading_scheduler and _trading_scheduler.is_running:
+        raise HTTPException(status_code=400, detail="Scheduler is already running. Stop it first.")
+
+    _trading_scheduler = TradingScheduler()
+
+    try:
+        await _trading_scheduler.start(
+            pairs=payload.pairs,
+            interval_minutes=payload.interval_minutes
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to start scheduler: {exc}") from exc
+
+    return {
+        "status": "started",
+        "pairs": payload.pairs,
+        "interval_minutes": payload.interval_minutes,
+        "message": f"Scheduler started - checking every {payload.interval_minutes} minute(s)",
+    }
+
+
+@router.post("/scheduler/stop")
+async def stop_scheduler() -> Dict[str, Any]:
+    """หยุด Real-time Trading Scheduler
+
+    Returns:
+        Status confirmation
+    """
+    global _trading_scheduler
+
+    if not _trading_scheduler or not _trading_scheduler.is_running:
+        raise HTTPException(status_code=400, detail="Scheduler is not running")
+
+    try:
+        await _trading_scheduler.stop()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to stop scheduler: {exc}") from exc
+
+    return {
+        "status": "stopped",
+        "message": "Scheduler stopped successfully",
+    }
+
+
+@router.get("/scheduler/status")
+async def get_scheduler_status() -> Dict[str, Any]:
+    """ดูสถานะ Scheduler
+
+    Returns:
+        Scheduler status และข้อมูลการทำงาน
+    """
+    global _trading_scheduler
+
+    if not _trading_scheduler:
+        return {
+            "status": "not_initialized",
+            "is_running": False,
+        }
+
+    scheduler_status = _trading_scheduler.get_status()
+
+    return {
+        "status": "running" if scheduler_status["is_running"] else "stopped",
+        **scheduler_status,
     }
