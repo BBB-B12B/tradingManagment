@@ -13,7 +13,7 @@ API_DIR="$ROOT/services/control_plane"
 
 WORKER_PORT="${WORKER_PORT:-8787}"
 WORKER_URL="${WORKER_URL:-http://127.0.0.1:${WORKER_PORT}}"
-UVICORN_PORT="${UVICORN_PORT:-8000}"
+UVICORN_PORT="${UVICORN_PORT:-5001}"
 WRANGLER_DEV_FLAGS="${WRANGLER_DEV_FLAGS:---remote}"
 
 echo "ROOT:          $ROOT"
@@ -24,14 +24,34 @@ echo "WORKER_URL:    $WORKER_URL"
 echo "UVICORN_PORT:  $UVICORN_PORT"
 echo "WRANGLER_DEV_FLAGS: $WRANGLER_DEV_FLAGS"
 
+# === CLEANUP OLD PROCESSES FIRST ===
+echo "Cleaning up old processes..."
+# Kill old Wrangler processes
+pkill -f "wrangler dev" 2>/dev/null || true
+# Kill old esbuild processes
+pkill -f "esbuild --service" 2>/dev/null || true
+# Kill old workerd processes
+pkill -f "workerd serve" 2>/dev/null || true
+# Kill old uvicorn processes on port 5001
+lsof -ti:5001 | xargs kill -9 2>/dev/null || true
+# Wait for cleanup
+sleep 2
+echo "Old processes cleaned up."
+
 worker_pid=""
 cleanup() {
+  echo "Cleanup triggered..."
   if [[ -n "$worker_pid" ]] && kill -0 "$worker_pid" 2>/dev/null; then
     echo "Stopping worker (pid=$worker_pid)..."
     kill "$worker_pid" 2>/dev/null || true
   fi
+  # Kill all wrangler/esbuild processes on exit
+  pkill -f "wrangler dev" 2>/dev/null || true
+  pkill -f "esbuild --service" 2>/dev/null || true
+  pkill -f "workerd serve" 2>/dev/null || true
+  echo "Cleanup complete."
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 echo "Starting worker with wrangler dev..."
 export WRANGLER_LOG_DIR="${WRANGLER_LOG_DIR:-/tmp/wrangler-logs}"

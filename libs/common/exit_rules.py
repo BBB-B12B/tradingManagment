@@ -23,6 +23,9 @@ class ExitReason(str, Enum):
     TRAILING_STOP = "TRAILING_STOP"         # Trailing Stop triggered
     DIVERGENCE_EXIT = "DIVERGENCE_EXIT"     # Bearish Divergence detected
     TAKE_PROFIT = "TAKE_PROFIT"             # Take Profit target hit
+    EMA_CROSSOVER_BEARISH = "EMA_CROSSOVER_BEARISH"  # Bull→Bear trend reversal
+    ORANGE_RED = "ORANGE_RED"               # Orange→Red pattern
+    STRONG_SELL = "STRONG_SELL"             # Bearish Divergence + Orange zone
     NONE = "NONE"
 
 

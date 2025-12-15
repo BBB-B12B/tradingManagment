@@ -50,7 +50,7 @@ from pydantic import BaseModel
 
 app = FastAPI(title="CDC Zone Control Plane")
 
-from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci, bot, order_sync, order_admin
+from routes import config, kill_switch, rules, positions, market, live_rules, backtest, fibonacci, bot, order_sync, order_admin, system
 from routes.config import _db as config_store, _load_configs_from_d1
 from telemetry.config_metrics import ConfigMetrics
 from telemetry.rule_metrics import RuleMetrics
@@ -95,10 +95,35 @@ def _post_order_to_worker(payload: Dict[str, Any]) -> None:
 
 @app.on_event("startup")
 async def startup_event():
-    """Load configs from D1 on startup"""
+    """Load configs from D1 on startup and restore scheduler if needed"""
     print("Loading configs from D1...")
     await _load_configs_from_d1()
     print(f"Loaded {len(config_store)} configs from D1")
+
+    # Auto-restore scheduler if it was running before reload
+    scheduler_state_file = SRC_DIR / ".scheduler_state.json"
+    if scheduler_state_file.exists():
+        try:
+            state = json.loads(scheduler_state_file.read_text())
+            print(f"🔄 Restoring scheduler: {state.get('pairs')} @ {state.get('interval_minutes')}min")
+
+            # Import and restore scheduler via the bot module
+            from routes import bot
+            from trading.scheduler import TradingScheduler
+
+            # Create new scheduler instance and set it in bot module
+            bot._trading_scheduler = TradingScheduler()
+
+            # Restore with saved config
+            await bot._trading_scheduler.start(
+                pairs=state.get("pairs", []),
+                interval_minutes=state.get("interval_minutes", 1.0)
+            )
+            print("✅ Scheduler restored successfully")
+        except Exception as e:
+            print(f"⚠️ Failed to restore scheduler: {e}")
+            # Clean up state file if restore fails
+            scheduler_state_file.unlink(missing_ok=True)
 
 
 app.include_router(config.router)
@@ -112,6 +137,7 @@ app.include_router(fibonacci.router)
 app.include_router(bot.router)
 app.include_router(order_sync.router)
 app.include_router(order_admin.router)
+app.include_router(system.router)
 app.add_api_route("/worker/orders", order_sync.fetch_worker_orders, methods=["GET"])
 
 config_metrics = ConfigMetrics()

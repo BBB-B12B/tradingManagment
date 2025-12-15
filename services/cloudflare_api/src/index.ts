@@ -142,7 +142,12 @@ async function handlePositions(
   // POST /positions - Update position state
   if (path === '/positions' && method === 'POST') {
     const body = await request.json() as any;
-    const { pair, status, entry_price, entry_time, entry_bar_index, w_low, sl_price, qty } = body;
+    const {
+      pair, status, entry_price, entry_time, entry_bar_index,
+      w_low, sl_price, qty,
+      activation_price, entry_trend_bullish,
+      trailing_stop_activated, trailing_stop_price, prev_high
+    } = body;
 
     const now = new Date().toISOString();
 
@@ -152,39 +157,65 @@ async function handlePositions(
     ).bind(pair.toUpperCase()).first();
 
     if (existing) {
-      // Update existing position
+      // Update existing position - only update fields that are provided
+      const updates: string[] = [];
+      const values: any[] = [];
+
+      if (status !== undefined) { updates.push('status = ?'); values.push(status); }
+      if (entry_price !== undefined) { updates.push('entry_price = ?'); values.push(entry_price); }
+      if (entry_time !== undefined) { updates.push('entry_time = ?'); values.push(entry_time); }
+      if (entry_bar_index !== undefined) { updates.push('entry_bar_index = ?'); values.push(entry_bar_index); }
+      if (w_low !== undefined) { updates.push('w_low = ?'); values.push(w_low); }
+      if (sl_price !== undefined) { updates.push('sl_price = ?'); values.push(sl_price); }
+      if (qty !== undefined) { updates.push('qty = ?'); values.push(qty); }
+      if (activation_price !== undefined) { updates.push('activation_price = ?'); values.push(activation_price); }
+      if (entry_trend_bullish !== undefined) {
+        updates.push('entry_trend_bullish = ?');
+        values.push(entry_trend_bullish ? 1 : 0);
+      }
+      if (trailing_stop_activated !== undefined) {
+        updates.push('trailing_stop_activated = ?');
+        values.push(trailing_stop_activated ? 1 : 0);
+      }
+      if (trailing_stop_price !== undefined) { updates.push('trailing_stop_price = ?'); values.push(trailing_stop_price); }
+      if (prev_high !== undefined) { updates.push('prev_high = ?'); values.push(prev_high); }
+
+      // Always update these
+      updates.push('last_update_time = ?');
+      values.push(now);
+      updates.push('updated_at = ?');
+      values.push(now);
+
+      // Add pair for WHERE clause
+      values.push(pair.toUpperCase());
+
       await env.CDC_DB.prepare(
-        `UPDATE position_states
-         SET status = ?, entry_price = ?, entry_time = ?, entry_bar_index = ?,
-             w_low = ?, sl_price = ?, qty = ?, last_update_time = ?, updated_at = ?
-         WHERE pair = ?`
-      ).bind(
-        status || 'FLAT',
-        entry_price || null,
-        entry_time || null,
-        entry_bar_index || null,
-        w_low || null,
-        sl_price || null,
-        qty || null,
-        now,
-        now,
-        pair.toUpperCase()
-      ).run();
+        `UPDATE position_states SET ${updates.join(', ')} WHERE pair = ?`
+      ).bind(...values).run();
     } else {
       // Insert new position
       await env.CDC_DB.prepare(
         `INSERT INTO position_states
-         (pair, status, entry_price, entry_time, entry_bar_index, w_low, sl_price, qty, last_update_time, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (pair, status, entry_price, entry_time, entry_bar_index,
+          w_low, sl_price, qty,
+          activation_price, entry_trend_bullish,
+          trailing_stop_activated, trailing_stop_price, prev_high,
+          last_update_time, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
         pair.toUpperCase(),
         status || 'FLAT',
-        entry_price || null,
-        entry_time || null,
-        entry_bar_index || null,
-        w_low || null,
-        sl_price || null,
-        qty || null,
+        entry_price ?? null,
+        entry_time ?? null,
+        entry_bar_index ?? null,
+        w_low ?? null,
+        sl_price ?? null,
+        qty ?? null,
+        activation_price ?? null,
+        entry_trend_bullish !== undefined ? (entry_trend_bullish ? 1 : 0) : null,
+        trailing_stop_activated !== undefined ? (trailing_stop_activated ? 1 : 0) : null,
+        trailing_stop_price ?? null,
+        prev_high ?? null,
         now,
         now,
         now
@@ -258,7 +289,7 @@ async function handleOrders(
       order_id, status, entry_reason, exit_reason,
       rule_1_cdc_green, rule_2_leading_red, rule_3_leading_signal, rule_4_pattern,
       entry_price, exit_price, pnl, pnl_pct,
-      w_low, sl_price, requested_at, filled_at
+      w_low, sl_price, activation_price, requested_at, filled_at
     } = body;
 
     const now = new Date().toISOString();
@@ -269,17 +300,30 @@ async function handleOrders(
         order_id, status, entry_reason, exit_reason,
         rule_1_cdc_green, rule_2_leading_red, rule_3_leading_signal, rule_4_pattern,
         entry_price, exit_price, pnl, pnl_pct,
-        w_low, sl_price, requested_at, filled_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        w_low, sl_price, activation_price, requested_at, filled_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
-      pair.toUpperCase(), order_type, side, requested_qty, filled_qty, avg_price,
-      order_id, status, entry_reason, exit_reason,
+      pair.toUpperCase(), order_type, side, requested_qty,
+      filled_qty ?? null,
+      avg_price ?? null,
+      order_id ?? null,
+      status,
+      entry_reason ?? null,
+      exit_reason ?? null,
       rule_1_cdc_green ? 1 : 0,
       rule_2_leading_red ? 1 : 0,
       rule_3_leading_signal ? 1 : 0,
       rule_4_pattern ? 1 : 0,
-      entry_price, exit_price, pnl, pnl_pct,
-      w_low, sl_price, requested_at, filled_at, now
+      entry_price ?? null,
+      exit_price ?? null,
+      pnl ?? null,
+      pnl_pct ?? null,
+      w_low ?? null,
+      sl_price ?? null,
+      activation_price ?? null,
+      requested_at,
+      filled_at ?? null,
+      now
     ).run();
 
     return jsonResponse({

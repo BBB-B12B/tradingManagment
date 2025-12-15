@@ -1,20 +1,18 @@
-"""CDC Zone Bot Rule Engine - evaluates all 4 rules.
+"""CDC Zone Bot Rule Engine - evaluates entry rules.
 
-The 4 core rules (all must pass):
-1. CDC Color = GREEN (both LTF current and HTF)
-2. Leading Red exists in LTF within window
-3. Leading Signal (momentum flip AND higher low)
-4. Pattern = W-shape (or NONE), NOT V-shape
+Entry Rule (must pass):
+1. CDC Color Transition = BLUE→GREEN (both LTF and HTF must have this pattern)
+
+Informational (does NOT block entry):
+2. Pattern = W-shape or V-shape (used to determine Trailing Stop Activation method)
 """
 
 from __future__ import annotations
 
-from typing import List, Dict, NamedTuple
+from typing import List, Dict, NamedTuple, Optional
 
 from libs.common.config.schema import RuleParameters
 from .types import Candle, CDCColor, RuleResult
-from .leading_red import check_leading_red
-from .leading_signal import check_momentum_flip, check_higher_low
 from .pattern_classifier import classify_pattern
 
 
@@ -26,6 +24,46 @@ class AllRulesResult(NamedTuple):
     rule_3_leading_signal: RuleResult
     rule_4_pattern: RuleResult
     summary: Dict[str, bool]
+
+
+def check_color_transition(
+    candles: List[Candle],
+    lookback_bars: int = 5,
+) -> Optional[Dict[str, any]]:
+    """
+    Check if there's a BLUE→GREEN color transition pattern.
+
+    Args:
+        candles: List of candles to check
+        lookback_bars: How many bars to look back (default: 5)
+
+    Returns:
+        Dict with transition info if found, None otherwise
+    """
+    if len(candles) < 2:
+        return None
+
+    # Blue colors = blue, lblue (bearish but price recovering)
+    blue_colors = {CDCColor.BLUE, CDCColor.LBLUE}
+
+    # Check last N bars for the pattern
+    start_idx = max(0, len(candles) - lookback_bars)
+
+    for i in range(start_idx, len(candles) - 1):
+        prev_candle = candles[i]
+        curr_candle = candles[i + 1]
+
+        # Found: BLUE/LBLUE → GREEN transition
+        if prev_candle.cdc_color in blue_colors and curr_candle.cdc_color == CDCColor.GREEN:
+            return {
+                "found": True,
+                "transition_bar_idx": i + 1,  # Index where it turned green
+                "prev_color": prev_candle.cdc_color.value,  # Convert enum to string
+                "curr_color": curr_candle.cdc_color.value,  # Convert enum to string
+                "bars_ago": len(candles) - 1 - (i + 1),
+            }
+
+    return None
 
 
 def evaluate_all_rules(
@@ -50,119 +88,73 @@ def evaluate_all_rules(
     Returns:
         AllRulesResult with individual rule results and overall pass/fail
     """
-    # Rule 1: CDC Green (checked in leading_red, but verify explicitly)
-    if not candles_ltf or candles_ltf[-1].cdc_color != CDCColor.GREEN:
+    # Rule 1: CDC Color Transition (BLUE→GREEN for both HTF and LTF)
+    htf_transition = check_color_transition(candles_htf, lookback_bars=5)
+    ltf_transition = check_color_transition(candles_ltf, lookback_bars=5)
+
+    # HTF must have BLUE→GREEN transition first
+    if not htf_transition:
         rule_1 = RuleResult(
             passed=False,
-            reason="LTF CDC is not GREEN",
-            metadata={"ltf_color": candles_ltf[-1].cdc_color if candles_ltf else None}
+            reason="HTF has no BLUE→GREEN transition in last 5 bars",
+            metadata={
+                "htf_current_color": candles_htf[-1].cdc_color.value if candles_htf else None,
+                "htf_transition": None,
+                "ltf_transition": ltf_transition,
+            }
         )
-    elif not candles_htf or candles_htf[-1].cdc_color != CDCColor.GREEN:
+    # Then LTF must also have BLUE→GREEN transition
+    elif not ltf_transition:
         rule_1 = RuleResult(
             passed=False,
-            reason="HTF CDC is not GREEN",
-            metadata={"htf_color": candles_htf[-1].cdc_color if candles_htf else None}
+            reason="LTF has no BLUE→GREEN transition in last 5 bars",
+            metadata={
+                "ltf_current_color": candles_ltf[-1].cdc_color.value if candles_ltf else None,
+                "htf_transition": htf_transition,
+                "ltf_transition": None,
+            }
         )
     else:
+        # Both have the transition pattern
         rule_1 = RuleResult(
             passed=True,
-            reason="Both LTF and HTF are GREEN",
+            reason="Both HTF and LTF have BLUE→GREEN transition",
             metadata={
-                "ltf_color": candles_ltf[-1].cdc_color,
-                "htf_color": candles_htf[-1].cdc_color,
+                "htf_transition": htf_transition,
+                "ltf_transition": ltf_transition,
+                "ltf_current_color": candles_ltf[-1].cdc_color.value,
+                "htf_current_color": candles_htf[-1].cdc_color.value,
             }
         )
 
-    # Rule 2: Leading Red
-    rule_2 = check_leading_red(
-        candles_ltf=candles_ltf,
-        candles_htf=candles_htf,
-        lead_red_min_bars=params.lead_red_min_bars,
-        lead_red_max_bars=params.lead_red_max_bars,
+    # Rule 2: Pattern (W-shape info for Trailing Stop Activation)
+    # This is informational only - does NOT block entry
+    rule_2 = classify_pattern(
+        candles=candles_ltf,
+        w_window_bars=params.w_window_bars,
+    )
+    # Force to always pass (info only)
+    rule_2 = RuleResult(
+        passed=True,
+        reason=rule_2.reason,
+        metadata=rule_2.metadata,
     )
 
-    # Rule 3: Leading Signal (momentum flip AND higher low)
-    if not enable_leading_signal:
-        rule_3 = RuleResult(
-            passed=True,
-            reason="Leading signal check disabled",
-            metadata={"enabled": False}
-        )
-    else:
-        momentum_result = check_momentum_flip(
-            macd_histogram=macd_histogram,
-            leading_momentum_lookback=params.leading_momentum_lookback,
-        )
-
-        higher_low_result = check_higher_low(
-            candles=candles_ltf,
-            higher_low_min_diff_pct=params.higher_low_min_diff_pct,
-            higher_low_max_bars_between=params.higher_low_max_bars_between,
-        )
-
-        # Both must pass
-        if momentum_result.passed and higher_low_result.passed:
-            rule_3 = RuleResult(
-                passed=True,
-                reason="Both momentum flip and higher low detected",
-                metadata={
-                    "momentum": momentum_result.metadata,
-                    "higher_low": higher_low_result.metadata,
-                }
-            )
-        else:
-            failed_parts = []
-            if not momentum_result.passed:
-                failed_parts.append("momentum flip")
-            if not higher_low_result.passed:
-                failed_parts.append("higher low")
-
-            rule_3 = RuleResult(
-                passed=False,
-                reason=f"Leading signal incomplete: missing {', '.join(failed_parts)}",
-                metadata={
-                    "momentum_passed": momentum_result.passed,
-                    "higher_low_passed": higher_low_result.passed,
-                    "momentum_reason": momentum_result.reason,
-                    "higher_low_reason": higher_low_result.reason,
-                }
-            )
-
-    # Rule 4: Pattern (W-shape allowed, V-shape blocks)
-    if not enable_w_shape_filter:
-        rule_4 = RuleResult(
-            passed=True,
-            reason="W-shape filter disabled",
-            metadata={"enabled": False}
-        )
-    else:
-        rule_4 = classify_pattern(
-            candles=candles_ltf,
-            w_window_bars=params.w_window_bars,
-        )
-
-    # Overall result
-    all_passed = all([
-        rule_1.passed,
-        rule_2.passed,
-        rule_3.passed,
-        rule_4.passed,
-    ])
+    # Overall result - only Rule 1 must pass for entry
+    all_passed = rule_1.passed
 
     summary = {
         "rule_1_cdc_green": rule_1.passed,
-        "rule_2_leading_red": rule_2.passed,
-        "rule_3_leading_signal": rule_3.passed,
-        "rule_4_pattern": rule_4.passed,
+        "rule_2_pattern": rule_2.passed,  # Always True (info only)
         "all_passed": all_passed,
     }
 
     return AllRulesResult(
         all_passed=all_passed,
         rule_1_cdc_green=rule_1,
-        rule_2_leading_red=rule_2,
-        rule_3_leading_signal=rule_3,
-        rule_4_pattern=rule_4,
+        rule_2_leading_red=rule_2,  # Keep for backward compatibility
+        rule_3_leading_signal=rule_2,  # Keep for backward compatibility
+        rule_4_pattern=rule_2,
         summary=summary,
     )
 

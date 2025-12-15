@@ -37,6 +37,13 @@ class PositionState:
     sl_price: Optional[float] = None  # Structural stop-loss
     qty: Optional[float] = None  # Position quantity
 
+    # Trailing Stop fields
+    activation_price: Optional[float] = None  # Fibonacci activation price
+    entry_trend_bullish: Optional[bool] = None  # EMA trend at entry
+    trailing_stop_activated: bool = False  # Whether trailing stop is active
+    trailing_stop_price: Optional[float] = None  # Current trailing SL price
+    prev_high: Optional[float] = None  # Previous high for trailing calculation
+
     # Metadata
     last_update_time: datetime = field(default_factory=datetime.now)
     created_at: datetime = field(default_factory=datetime.now)
@@ -149,6 +156,11 @@ class PositionState:
         self.w_low = None
         self.sl_price = None
         self.qty = None
+        self.activation_price = None
+        self.entry_trend_bullish = None
+        self.trailing_stop_activated = False
+        self.trailing_stop_price = None
+        self.prev_high = None
         self.last_update_time = datetime.now()
         self.updated_at = datetime.now()
 
@@ -166,6 +178,11 @@ class PositionState:
         self.w_low = None
         self.sl_price = None
         self.qty = None
+        self.activation_price = None
+        self.entry_trend_bullish = None
+        self.trailing_stop_activated = False
+        self.trailing_stop_price = None
+        self.prev_high = None
         self.last_update_time = datetime.now()
         self.updated_at = datetime.now()
 
@@ -182,6 +199,11 @@ class PositionState:
             "w_low": self.w_low,
             "sl_price": self.sl_price,
             "qty": self.qty,
+            "activation_price": self.activation_price,
+            "entry_trend_bullish": self.entry_trend_bullish,
+            "trailing_stop_activated": self.trailing_stop_activated,
+            "trailing_stop_price": self.trailing_stop_price,
+            "prev_high": self.prev_high,
             "last_update_time": self.last_update_time.isoformat(),
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
@@ -199,6 +221,11 @@ class PositionState:
             w_low=data.get("w_low"),
             sl_price=data.get("sl_price"),
             qty=data.get("qty"),
+            activation_price=data.get("activation_price"),
+            entry_trend_bullish=bool(data.get("entry_trend_bullish")) if data.get("entry_trend_bullish") is not None else None,
+            trailing_stop_activated=bool(data.get("trailing_stop_activated", False)),
+            trailing_stop_price=data.get("trailing_stop_price"),
+            prev_high=data.get("prev_high"),
             last_update_time=_parse_datetime(data["last_update_time"]),
             created_at=_parse_datetime(data["created_at"]),
             updated_at=_parse_datetime(data["updated_at"]),

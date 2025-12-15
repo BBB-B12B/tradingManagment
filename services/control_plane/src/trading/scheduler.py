@@ -15,10 +15,32 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from typing import List, Optional
+from collections import deque
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from trading.realtime_engine import RealtimeTradingEngine
+import ccxt.async_support as ccxt
+import os
+from pathlib import Path
+
+
+# โหลด .env file ถ้ามี
+def _load_env_once():
+    """โหลด environment variables จาก .env.dev"""
+    project_root = Path(__file__).parent.parent.parent.parent
+    env_path = project_root / ".env" / ".env.dev"
+
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+
+
+_load_env_once()
 
 
 class TradingScheduler:
@@ -28,15 +50,45 @@ class TradingScheduler:
         self.scheduler = AsyncIOScheduler()
         self.is_running = False
         self.pairs: List[str] = []
-        self.interval_minutes = 1
+        self.interval_minutes: float = 1.0
+        self.logs = deque(maxlen=200)  # buffer สำหรับ UI log
+        self.binance_client: Optional[ccxt.binance] = None
+
+    def _record_log(self, entry: dict):
+        """เก็บ log ลง buffer (ts=UTC)"""
+        self.logs.append({**entry, "ts": datetime.utcnow().isoformat()})
+
+    async def _get_binance_balance(self, asset: str = "BTC") -> float:
+        """ดึง Balance จาก Binance Testnet"""
+        try:
+            if not self.binance_client:
+                api_key = os.getenv("BINANCE_API_KEY", "")
+                api_secret = os.getenv("BINANCE_API_SECRET", "")
+
+                if not api_key or not api_secret:
+                    return 0.0
+
+                self.binance_client = ccxt.binance({
+                    'apiKey': api_key,
+                    'secret': api_secret,
+                    'enableRateLimit': True,
+                    'options': {
+                        'defaultType': 'spot',
+                        'recvWindow': 10000,  # Allow 10s timestamp difference
+                    },
+                })
+                self.binance_client.set_sandbox_mode(True)
+                # Sync with server time
+                await self.binance_client.load_time_difference()
+
+            balance = await self.binance_client.fetch_balance(params={'recvWindow': 10000})
+            return float(balance.get('free', {}).get(asset, 0))
+        except Exception as e:
+            print(f"[Scheduler] Error fetching balance: {e}")
+            return 0.0
 
     async def _check_all_pairs(self):
         """ตรวจสอบทุกคู่เงิน (เรียกโดย Scheduler)"""
-        print(f"\n{'='*60}")
-        print(f"[{datetime.now()}] 🔍 กำลังตรวจสอบสัญญาณเทรด...")
-        print(f"คู่เงิน: {', '.join(self.pairs)}")
-        print(f"{'='*60}\n")
-
         results = []
 
         for pair in self.pairs:
@@ -53,8 +105,21 @@ class TradingScheduler:
                 action = result.get("action", "unknown")
                 status = result.get("status", "unknown")
                 position = result.get("position", {})
+                qty_display = float(position.get("qty") or 0)
 
-                print(f"\n📊 [{pair}] สถานะ: {position.get('status', 'FLAT')} | จำนวน: {position.get('qty', 0):.4f}")
+                # ดึง Binance Balance (สำหรับ BTC/USDT)
+                btc_balance = 0.0
+                if "BTC" in pair.upper():
+                    btc_balance = await self._get_binance_balance("BTC")
+
+                # บันทึก Position State Log ก่อนทุกครั้ง (พร้อม Binance Balance)
+                self._record_log({
+                    "pair": pair,
+                    "action": "position_state",
+                    "status": position.get("status", "FLAT"),
+                    "position": position,
+                    "binance_balance": btc_balance,  # เพิ่ม balance จริง
+                })
 
                 if action == "buy":
                     # Entry Signal
@@ -62,69 +127,88 @@ class TradingScheduler:
                     sl_price = result.get('sl_price', 0)
                     qty = result.get('quantity', 0)
                     rules = result.get('rules', {})
+                    order_info = result.get('order', {})
 
-                    print(f"✅ [ENTRY] {pair} @ {entry_price:.2f}")
-                    print(f"   📈 ราคาเข้า: {entry_price:.2f} | จำนวน: {qty:.4f}")
-                    print(f"   🛑 Stop Loss: {sl_price:.2f}")
-                    print(f"   📋 เงื่อนไข:")
-                    print(f"      ✓ Rule 1 (CDC Green): {'✅' if rules.get('rule_1_cdc_green') else '❌'}")
-                    print(f"      ✓ Rule 2 (Leading Red): {'✅' if rules.get('rule_2_leading_red') else '❌'}")
-                    print(f"      ✓ Rule 3 (Leading Signal): {'✅' if rules.get('rule_3_leading_signal') else '❌'}")
-                    print(f"      ✓ Rule 4 (W-Shape): {'✅' if rules.get('rule_4_pattern') else '❌'}")
+                    self._record_log({
+                        "pair": pair,
+                        "action": "buy",
+                        "status": status,
+                        "entry_price": entry_price,
+                        "sl_price": sl_price,
+                        "qty": qty,
+                        "rules": rules,
+                        "rules_detail": result.get("rules_detail"),
+                        "position": position,
+                        "binance_order_id": order_info.get("order_id"),
+                        "binance_status": order_info.get("binance_status"),
+                        "filled_qty": order_info.get("filled_qty"),
+                        "avg_price": order_info.get("avg_price"),
+                    })
 
                 elif action == "sell":
                     # Exit Signal
                     reason = result.get("reason", "unknown")
                     exit_price = result.get("exit_price", 0)
                     pnl_pct = result.get("pnl_pct", 0)
+                    order_info = result.get('order', {})
 
-                    reason_thai = {
-                        "STOP_LOSS": "🛑 Stop Loss ถูกชน",
-                        "TRAILING_STOP": "📉 Trailing Stop ถูกชน",
-                        "ORANGE_RED": "🟠➡️🔴 CDC เปลี่ยนจาก Orange → Red",
-                        "DIVERGENCE": "📊 RSI Divergence (STRONG_SELL)",
-                        "EMA_CROSS": "📉 EMA Crossover Bearish",
-                    }.get(reason, reason)
-
-                    pnl_symbol = "📈" if pnl_pct >= 0 else "📉"
-                    print(f"❌ [EXIT] {pair} @ {exit_price:.2f}")
-                    print(f"   📊 เหตุผล: {reason_thai}")
-                    print(f"   {pnl_symbol} P&L: {pnl_pct:+.2f}%")
+                    self._record_log({
+                        "pair": pair,
+                        "action": "sell",
+                        "status": status,
+                        "reason": reason,
+                        "exit_price": exit_price,
+                        "pnl_pct": pnl_pct,
+                        "position": position,
+                        "binance_order_id": order_info.get("order_id"),
+                        "binance_status": order_info.get("binance_status"),
+                        "filled_qty": order_info.get("filled_qty"),
+                        "avg_price": order_info.get("avg_price"),
+                    })
 
                 elif action == "wait":
-                    # No Signal
-                    status_thai = {
-                        "no_entry_signal": "⏸️ ไม่มีสัญญาณเข้า (เงื่อนไขไม่ผ่าน)",
-                        "holding": "⏳ กำลังถือ Position อยู่",
-                        "insufficient_data": "📊 ข้อมูลไม่เพียงพอ",
-                    }.get(status, status)
-
-                    print(f"{status_thai}")
-
-                    # แสดงรายละเอียดเงื่อนไขที่ไม่ผ่าน (ถ้ามี)
+                    # No Signal - บันทึก log สำหรับ UI
                     if status == "no_entry_signal" and "rules" in result:
+                        # Entry Mode: แสดง Rules
                         rules = result["rules"]
-                        print(f"   📋 เงื่อนไข:")
-                        print(f"      Rule 1 (CDC Green): {'✅' if rules.get('rule_1_cdc_green') else '❌'}")
-                        print(f"      Rule 2 (Leading Red): {'✅' if rules.get('rule_2_leading_red') else '❌'}")
-                        print(f"      Rule 3 (Leading Signal): {'✅' if rules.get('rule_3_leading_signal') else '❌'}")
-                        print(f"      Rule 4 (W-Shape): {'✅' if rules.get('rule_4_pattern') else '❌'}")
+                        self._record_log({
+                            "pair": pair,
+                            "action": "wait",
+                            "status": status,
+                            "reason": result.get("reason", status),
+                            "rules": rules,
+                            "rules_detail": result.get("rules_detail"),
+                            "position": position,
+                        })
+                    elif status == "holding" and "exit_checks" in result:
+                        # Exit Mode: แสดง Exit Checks
+                        self._record_log({
+                            "pair": pair,
+                            "action": "wait",
+                            "status": "monitoring_exit",
+                            "reason": "Holding position - monitoring exit conditions",
+                            "exit_checks": result.get("exit_checks"),
+                            "position": position,
+                            "current_price": result.get("current_price"),
+                            "sl_distance": result.get("sl_distance"),
+                        })
 
             except Exception as e:
-                print(f"❌ [{pair}] เกิดข้อผิดพลาด: {str(e)}")
+                self._record_log({
+                    "pair": pair,
+                    "action": "error",
+                    "status": "error",
+                    "error": str(e),
+                })
                 results.append({
                     "pair": pair,
                     "status": "error",
                     "error": str(e)
                 })
 
-        print(f"\n{'='*60}")
-        print(f"[{datetime.now()}] ✅ ตรวจสอบเสร็จสิ้น")
-        print(f"{'='*60}\n")
-
         return results
 
-    async def start(self, pairs: List[str], interval_minutes: int = 1):
+    async def start(self, pairs: List[str], interval_minutes: float = 1.0):
         """เริ่ม Scheduler
 
         Args:
@@ -135,12 +219,12 @@ class TradingScheduler:
             raise RuntimeError("Scheduler is already running")
 
         self.pairs = pairs
-        self.interval_minutes = interval_minutes
+        self.interval_minutes = float(interval_minutes)
 
         # เพิ่ม Job เข้า Scheduler
         self.scheduler.add_job(
             self._check_all_pairs,
-            trigger=IntervalTrigger(minutes=interval_minutes),
+            trigger=IntervalTrigger(seconds=self.interval_minutes * 60),
             id=f"trading_check_{interval_minutes}m",
             replace_existing=True,
             max_instances=1,  # ป้องกันการทำงานซ้ำซ้อน
@@ -149,12 +233,13 @@ class TradingScheduler:
         self.scheduler.start()
         self.is_running = True
 
-        print(f"\n{'*'*60}")
-        print(f"🚀 Trading Scheduler STARTED")
-        print(f"   Pairs: {', '.join(pairs)}")
-        print(f"   Interval: Every {interval_minutes} minute(s)")
-        print(f"   Started at: {datetime.now()}")
-        print(f"{'*'*60}\n")
+        # บันทึก Scheduler Start Log
+        self._record_log({
+            "pair": ", ".join(pairs),
+            "action": "scheduler_start",
+            "status": "started",
+            "interval_minutes": interval_minutes,
+        })
 
         # รันทันทีครั้งแรก (ไม่รอ interval)
         await self._check_all_pairs()
@@ -166,11 +251,6 @@ class TradingScheduler:
 
         self.scheduler.shutdown(wait=True)
         self.is_running = False
-
-        print(f"\n{'*'*60}")
-        print(f"⛔ Trading Scheduler STOPPED")
-        print(f"   Stopped at: {datetime.now()}")
-        print(f"{'*'*60}\n")
 
     def get_status(self) -> dict:
         """ดูสถานะ Scheduler
@@ -192,6 +272,10 @@ class TradingScheduler:
                 for job in jobs
             ],
         }
+
+    def get_logs(self) -> List[dict]:
+        """คืนค่า log buffer สำหรับ UI"""
+        return list(self.logs)
 
 
 __all__ = ["TradingScheduler"]

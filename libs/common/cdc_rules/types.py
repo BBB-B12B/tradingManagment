@@ -11,6 +11,10 @@ class CDCColor(str, Enum):
     """CDC indicator color."""
     GREEN = "green"
     RED = "red"
+    BLUE = "blue"
+    LBLUE = "lblue"
+    ORANGE = "orange"
+    YELLOW = "yellow"
     NONE = "none"
 
 

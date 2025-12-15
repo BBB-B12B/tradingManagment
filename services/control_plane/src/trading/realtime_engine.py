@@ -30,6 +30,7 @@ from clients.binance_th_client import BinanceTHClient
 from libs.common.cdc_rules import evaluate_all_rules
 from libs.common.cdc_rules.types import Candle, CDCColor
 from libs.common.cdc_rules.divergence import calculate_rsi, DivergenceDetector, DivergenceType
+from enum import Enum
 from libs.common.exit_rules import ExitReason
 from libs.common.position_state import PositionState, PositionStatus
 from indicators.fibonacci import trace_wave_from_entry
@@ -40,6 +41,7 @@ from indicators.action_zone import compute_action_zone
 import httpx
 import os
 import uuid
+import ccxt
 
 
 LTF_TO_HTF = {
@@ -52,10 +54,26 @@ LTF_TO_HTF = {
 
 _WORKER_URL = os.getenv("CLOUDFLARE_WORKER_URL", "http://localhost:8787")
 _WORKER_TOKEN = os.getenv("CLOUDFLARE_WORKER_API_TOKEN", "")
+_BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
+_BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 
 
 def _auth_headers() -> Dict[str, str]:
     return {"Authorization": f"Bearer {_WORKER_TOKEN}"} if _WORKER_TOKEN else {}
+
+
+def _make_binance_client() -> ccxt.binance:
+    """สร้าง Binance client สำหรับ Testnet"""
+    if not _BINANCE_API_KEY or not _BINANCE_API_SECRET:
+        raise RuntimeError("Missing BINANCE_API_KEY or BINANCE_API_SECRET in environment")
+
+    client = ccxt.binance({
+        "apiKey": _BINANCE_API_KEY,
+        "secret": _BINANCE_API_SECRET,
+        "options": {"defaultType": "spot"},
+    })
+    client.set_sandbox_mode(True)  # Use Testnet
+    return client
 
 
 def _ema(values: List[float], period: int) -> List[float]:
@@ -83,15 +101,42 @@ def _macd_histogram(closes: List[float]) -> List[float]:
     return [macd - signal for macd, signal in zip(macd_line, signal_line)]
 
 
+def _serialize_metadata(obj: Any) -> Any:
+    """Recursively convert Enum objects to their values for JSON serialization"""
+    if isinstance(obj, Enum):
+        return obj.value
+    elif isinstance(obj, dict):
+        return {k: _serialize_metadata(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_serialize_metadata(item) for item in obj]
+    else:
+        return obj
+
+
 def _decorate_candles(raw_rows: List[dict]) -> List[Candle]:
     """Convert raw Binance rows to Candle objects with CDC colors"""
     closes = [row["close"] for row in raw_rows]
-    hist = _macd_histogram(closes)
+
+    # Calculate CDC Action Zone colors using EMA-based logic
+    action_zones = compute_action_zone(closes, fast_period=12, slow_period=26)
 
     candles: List[Candle] = []
-    for row, hist_value in zip(raw_rows, hist):
+    for row, zone_data in zip(raw_rows, action_zones):
         ts = dt.datetime.utcfromtimestamp(row["open_time"] / 1000)
-        color = CDCColor.GREEN if hist_value >= 0 else CDCColor.RED
+
+        # Map zone string to CDCColor enum
+        zone = zone_data["zone"]
+        color_map = {
+            "green": CDCColor.GREEN,
+            "red": CDCColor.RED,
+            "blue": CDCColor.BLUE,
+            "lblue": CDCColor.LBLUE,
+            "orange": CDCColor.ORANGE,
+            "yellow": CDCColor.YELLOW,
+            "none": CDCColor.NONE,
+        }
+        color = color_map.get(zone, CDCColor.NONE)
+
         candles.append(
             Candle(
                 timestamp=ts,
@@ -132,52 +177,94 @@ class RealtimeTradingEngine:
         await self._load_position_state()
 
         # 2. ดึงข้อมูล Candles และคำนวณ Indicators
-        candles_ltf, candles_htf, macd_hist, ltf_rows = await self._fetch_market_data()
+        candles_ltf, candles_htf, macd_hist, ltf_rows, strong_states = await self._fetch_market_data()
 
         if not self.position.is_long():
             # โหมด ENTRY - ตรวจสอบเงื่อนไขเข้าซื้อ
-            result = await self._check_entry(candles_ltf, candles_htf, macd_hist, ltf_rows)
+
+            # ⚠️ เช็คว่ามี Pending ENTRY Order อยู่หรือไม่
+            if self._has_pending_entry_order():
+                result = {
+                    "action": "wait",
+                    "status": "pending_order_exists",
+                    "reason": "มี Order ENTRY ที่ PENDING อยู่แล้ว รอให้ match ก่อน",
+                }
+            else:
+                result = await self._check_entry(candles_ltf, candles_htf, macd_hist, ltf_rows, strong_states)
         else:
             # โหมด EXIT - ตรวจสอบเงื่อนไขออกขาย
-            result = await self._check_exit(candles_ltf, candles_htf, macd_hist, ltf_rows)
+            result = await self._check_exit(candles_ltf, candles_htf, macd_hist, ltf_rows, strong_states)
 
         # เพิ่ม Position info ใน result
         result["position"] = self.position.to_dict()
         return result
 
     async def _load_position_state(self):
-        """โหลด Position State จาก D1 Worker"""
+        """โหลด Position State จาก D1 Worker และเช็ค Pending Orders"""
         try:
-            # ดึงจาก Worker API (ถ้ามี endpoint)
-            # ตอนนี้ใช้ logic เดิมจาก bot.py ในการคำนวณจาก orders
+            # ดึง Orders จาก Worker API
             orders_data = await fetch_worker_orders()
             orders = orders_data.get("orders", [])
 
-            # คำนวณ Position จาก Orders (FIFO)
+            # เก็บ orders ไว้ใช้เช็ค pending ภายหลัง
+            self.all_orders = orders
+
+            # ดึง Position State จาก D1
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{_WORKER_URL}/positions/{self.pair}",
+                    headers=_auth_headers(),
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                position_data = resp.json().get("position", {})
+
+            # คำนวณ Position จาก Orders (FIFO) เพื่อหา qty และ avg_cost
             position_info = self._compute_open_position(orders)
 
-            if position_info["qty"] > 0:
-                # มี Position
+            # Dust threshold - ถือว่า qty < 0.000001 เป็น 0
+            MIN_POSITION_QTY = 0.000001
+
+            if position_info["qty"] >= MIN_POSITION_QTY:
+                # มี Position - โหลดข้อมูลจาก D1 + เติม qty/avg_cost จาก FIFO
                 self.position = PositionState(
                     pair=self.pair,
                     status=PositionStatus.LONG,
                     entry_price=position_info["avg_cost"],
                     qty=position_info["qty"],
-                    # TODO: ดึง w_low, sl_price จาก D1
+                    w_low=position_data.get("w_low"),
+                    sl_price=position_data.get("sl_price"),
+                    activation_price=position_data.get("activation_price"),
+                    entry_trend_bullish=bool(position_data.get("entry_trend_bullish")) if position_data.get("entry_trend_bullish") is not None else None,
+                    trailing_stop_activated=bool(position_data.get("trailing_stop_activated", False)),
+                    trailing_stop_price=position_data.get("trailing_stop_price"),
+                    prev_high=position_data.get("prev_high"),
                 )
             else:
-                # ไม่มี Position
+                # ไม่มี Position (รวม dust position)
                 self.position = PositionState(
                     pair=self.pair,
                     status=PositionStatus.FLAT,
                 )
 
-            print(f"[{self.pair}] Position State: {self.position.status.value} | Qty: {self.position.qty or 0}")
-
         except Exception as e:
             print(f"[{self.pair}] Error loading position state: {e}")
             # Fallback: สร้าง Position FLAT
             self.position = PositionState(pair=self.pair, status=PositionStatus.FLAT)
+            self.all_orders = []
+
+    def _has_pending_entry_order(self) -> bool:
+        """เช็คว่ามี Pending ENTRY Order อยู่หรือไม่"""
+        pair_upper = self.pair.upper()
+        relevant = [o for o in self.all_orders if (o.get("pair") or "").upper() == pair_upper]
+
+        for o in relevant:
+            if (o.get("order_type") or "").upper() == "ENTRY":
+                status = (o.get("status") or "").upper()
+                # เช็คว่าเป็น Pending หรือไม่ (ไม่รวม NEW เพราะเราไม่ใช้แล้ว)
+                if status == "PENDING":
+                    return True
+        return False
 
     def _compute_open_position(self, orders: List[Dict[str, Any]]) -> Dict[str, Any]:
         """คำนวณ Position จาก Order History (FIFO)"""
@@ -209,15 +296,26 @@ class RealtimeTradingEngine:
             if status in ignored_status:
                 continue
 
-            qty = float(o.get("filled_qty") or o.get("requested_qty") or 0)
+            # ⚠️ IMPORTANT: นับเฉพาะ Order ที่ FILLED แล้วเท่านั้น
+            # - ไม่นับ PENDING orders (ยังไม่ match)
+            # - ใช้ filled_qty เท่านั้น ห้ามใช้ requested_qty
+            # - Status ที่ยอมรับ: FILLED, CLOSED, PARTIALLY_FILLED
+            is_filled = status in {"FILLED", "CLOSED", "PARTIALLY_FILLED"}
+
+            if not is_filled:
+                # Skip orders ที่ยังไม่ filled (NEW, PENDING, etc.)
+                continue
+
+            qty = float(o.get("filled_qty") or 0)
+            if qty <= 0:
+                continue
+
             price = float(o.get("avg_price") or o.get("entry_price") or 0)
 
             if (o.get("order_type") or "").upper() == "ENTRY":
-                if qty > 0:
-                    entry_queue.append({"qty": qty, "price": price})
+                entry_queue.append({"qty": qty, "price": price})
             elif (o.get("order_type") or "").upper() == "EXIT":
-                if qty > 0:
-                    _consume_exit(qty)
+                _consume_exit(qty)
 
         total_qty = sum(leg["qty"] for leg in entry_queue)
         total_cost = sum(leg["qty"] * leg["price"] for leg in entry_queue)
@@ -228,6 +326,35 @@ class RealtimeTradingEngine:
             "avg_cost": avg_cost,
             "legs": entry_queue,
         }
+
+    async def _update_trailing_stop_state(
+        self,
+        trailing_stop_activated: bool,
+        trailing_stop_price: float,
+        prev_high: float
+    ):
+        """อัปเดต Trailing Stop State กลับไปที่ D1"""
+        try:
+            update_payload = {
+                "pair": self.pair,
+                "trailing_stop_activated": trailing_stop_activated,
+                "trailing_stop_price": trailing_stop_price,
+                "prev_high": prev_high,
+            }
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{_WORKER_URL}/positions",
+                    json=update_payload,
+                    headers=_auth_headers(),
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+                print(f"[TRAILING STOP] State saved to D1: activated={trailing_stop_activated}, SL={trailing_stop_price:.2f}")
+
+        except Exception as e:
+            print(f"[TRAILING STOP] Error saving state to D1: {e}")
+            # Don't raise - we can continue even if save fails
 
     async def _fetch_market_data(self):
         """ดึงข้อมูล Candles และคำนวณ Indicators"""
@@ -246,89 +373,232 @@ class RealtimeTradingEngine:
         candles_htf = _decorate_candles(htf_rows)
         macd_hist = _macd_histogram([row["close"] for row in ltf_rows])
 
-        return candles_ltf, candles_htf, macd_hist, ltf_rows
+        # คำนวณ RSI และ Divergence (สำหรับ PRIORITY 1 Entry)
+        rsi_values = calculate_rsi([row["close"] for row in ltf_rows], period=14)
+        rsi_clean = [x for x in rsi_values if x is not None]
+        lows = [c.low for c in candles_ltf[-len(rsi_clean):]]
+        highs = [c.high for c in candles_ltf[-len(rsi_clean):]]
+        trends = [1 if c.close > c.open else -1 for c in candles_ltf[-len(rsi_clean):]]
+
+        detector = DivergenceDetector()
+        divergences = detector.detect(rsi_clean, lows, highs, trends)
+
+        # สร้าง divergence lookup by end index
+        div_by_end_idx = {div.end_index: div for div in divergences}
+
+        # คำนวณ Strong States (เหมือน backtest.py)
+        strong_states = self._calculate_strong_states(
+            candles_ltf, rsi_values, div_by_end_idx
+        )
+
+        return candles_ltf, candles_htf, macd_hist, ltf_rows, strong_states
+
+    def _calculate_strong_states(
+        self,
+        candles: List[Candle],
+        rsi_values: List[Optional[float]],
+        div_by_end_idx: dict
+    ) -> List[dict]:
+        """คำนวณ Strong States สำหรับ Divergence Entry (เหมือน backtest.py line 123-188)"""
+        states = []
+        bullish_active = False
+        bullish_div_idx: Optional[int] = None
+        bearish_active = False
+        bearish_div_idx: Optional[int] = None
+
+        for i, candle in enumerate(candles):
+            rsi = rsi_values[i] if i < len(rsi_values) else None
+            state = {
+                "index": i,
+                "time": candle.timestamp,
+                "strong_buy": "none-Active",
+                "strong_sell": "none-Active",
+                "special_signal": None,
+                "cutloss": None,
+            }
+
+            if rsi is None:
+                states.append(state)
+                continue
+
+            zone = candle.cdc_color
+
+            # Bullish Divergence Logic (backtest.py line 140-188)
+            if i in div_by_end_idx:
+                div = div_by_end_idx[i]
+                if div.type == DivergenceType.BULLISH:
+                    bullish_active = True
+                    bullish_div_idx = i
+                    state["strong_buy"] = "Active"
+                elif div.type == DivergenceType.BEARISH:
+                    bearish_active = True
+                    bearish_div_idx = i
+                    state["strong_sell"] = "Active"
+
+            # Bullish signal: Blue zone after divergence
+            if bullish_active and zone == CDCColor.BLUE:
+                # Find cutloss from consecutive red candles
+                cutloss = candle.close * 0.95  # fallback
+                if bullish_div_idx is not None:
+                    red_low = None
+                    for j in range(bullish_div_idx, i):
+                        if candles[j].cdc_color == CDCColor.RED:
+                            if red_low is None or candles[j].low < red_low:
+                                red_low = candles[j].low
+                        else:
+                            red_low = None
+                    if red_low is not None:
+                        cutloss = min(cutloss, red_low)
+
+                state["special_signal"] = "BUY"
+                state["cutloss"] = cutloss
+                state["strong_buy"] = "none-Active"
+                bullish_active = False
+                bullish_div_idx = None
+
+            # Bearish signal: Orange zone after divergence
+            if bearish_active and zone == CDCColor.ORANGE:
+                state["special_signal"] = "SELL"
+                state["strong_sell"] = "none-Active"
+                bearish_active = False
+                bearish_div_idx = None
+
+            # Keep Active state if still active
+            if bullish_active and state["strong_buy"] == "none-Active":
+                state["strong_buy"] = "Active"
+            if bearish_active and state["strong_sell"] == "none-Active":
+                state["strong_sell"] = "Active"
+
+            states.append(state)
+
+        return states
 
     async def _check_entry(
         self,
         candles_ltf: List[Candle],
         candles_htf: List[Candle],
         macd_hist: List[float],
-        ltf_rows: List[dict]
+        ltf_rows: List[dict],
+        strong_states: List[dict]
     ) -> Dict[str, Any]:
-        """ตรวจสอบเงื่อนไข ENTRY (4 กฎ)
+        """ตรวจสอบเงื่อนไข ENTRY (เหมือน backtest.py ทุกประการ)
 
-        ⚠️ IMPORTANT: ใช้เฉพาะแท่งเทียนที่ CLOSED แล้วเท่านั้น
-        - ตัดแท่งปัจจุบันออก (candles[:-1])
-        - Entry ที่ราคาเปิดของแท่งถัดไป (candles[-1].open)
+        มี 2 เงื่อนไข Entry (Priority):
+        1. PRIORITY 1: Divergence Entry (special_signal == "BUY")
+        2. PRIORITY 2: Pattern Entry (blue → green + bull + not V-shape)
+
+        ไม่ใช้ CDC Rules 4 ข้อเป็นเงื่อนไข Entry!
+        Rules ใช้เพื่อบันทึกและคำนวณ Trailing Stop เท่านั้น
         """
 
-        # ใช้เฉพาะแท่งที่ปิดแล้ว (ไม่รวมแท่งปัจจุบัน)
-        if len(candles_ltf) < 2 or len(candles_htf) < 2:
+        # ตรวจสอบว่ามีข้อมูลเพียงพอ
+        if len(candles_ltf) < 3 or len(ltf_rows) < 3:
             return {
-                "status": "insufficient_data",
+                "status": "no_entry_signal",
                 "action": "wait",
-                "reason": "Not enough closed candles",
+                "reason": "Insufficient candles (need at least 3)",
             }
 
-        candles_ltf_closed = candles_ltf[:-1]  # ตัดแท่งปัจจุบันออก
-        candles_htf_closed = candles_htf[:-1]
-        macd_hist_closed = macd_hist[:-1]
+        current_candle = candles_ltf[-1]
+        current_row = ltf_rows[-1]
+        current_state = strong_states[-1] if strong_states else None
 
-        # ประเมินกฎทั้ง 4 ข้อ (ใช้เฉพาะแท่งปิด)
+        # ประเมิน Rules เพื่อบันทึก (ไม่ได้ใช้เป็นเงื่อนไข Entry)
         rules_result = evaluate_all_rules(
-            candles_ltf=candles_ltf_closed,
-            candles_htf=candles_htf_closed,
-            macd_histogram=macd_hist_closed,
+            candles_ltf=candles_ltf,
+            candles_htf=candles_htf,
+            macd_histogram=macd_hist,
             params=self.config.rule_params,
             enable_w_shape_filter=self.config.enable_w_shape_filter,
             enable_leading_signal=self.config.enable_leading_signal,
         )
 
-        if not rules_result.all_passed:
+        # PRIORITY 1: Divergence Entry (backtest.py line 407-425)
+        if current_state and current_state.get("special_signal") == "BUY":
+            entry_price = current_candle.close
+            position_cutloss = current_state.get("cutloss")
+
+            # Validate cutloss
+            if position_cutloss is None or entry_price <= position_cutloss:
+                return {
+                    "status": "no_entry_signal",
+                    "action": "wait",
+                    "reason": f"Divergence entry invalid: cutloss={position_cutloss}, entry={entry_price}",
+                    "rules": rules_result.summary,
+                }
+
+            # คำนวณ Position Size
+            capital = 10000
+            quantity = capital / entry_price
+
+            # ส่ง Order ไป Binance
+            order_result = await self._execute_entry_order(
+                entry_price=entry_price,
+                quantity=quantity,
+                structural_sl=position_cutloss,
+                activation_price=entry_price * 1.075,  # Placeholder
+                rules=rules_result,
+            )
+
+            return {
+                "status": "entry_signal_detected",
+                "action": "buy",
+                "pair": self.pair,
+                "entry_price": entry_price,
+                "quantity": quantity,
+                "sl_price": position_cutloss,
+                "entry_type": "DIVERGENCE",
+                "special_signal": "BUY",
+                "rules": rules_result.summary,
+                "order": order_result,
+            }
+
+        # PRIORITY 2: Pattern Entry (backtest.py line 493-500)
+        prev2_candle = candles_ltf[-3]
+        prev_candle = candles_ltf[-2]
+
+        prev2_zone = prev2_candle.cdc_color
+        prev_zone = prev_candle.cdc_color
+
+        # Check Bull Trend (EMA Fast > EMA Slow)
+        ema_fast = current_row.get("ema_fast", 0)
+        ema_slow = current_row.get("ema_slow", 0)
+        is_bull = ema_fast > ema_slow
+
+        # Check V-shape
+        is_v_shape = current_row.get("is_v_shape", False)
+
+        # Entry Condition: blue → green + bull + not V-shape
+        if not (
+            prev2_zone == CDCColor.BLUE
+            and prev_zone == CDCColor.GREEN
+            and is_bull
+            and not is_v_shape
+        ):
             return {
                 "status": "no_entry_signal",
                 "action": "wait",
-                "reason": "Entry conditions not met",
+                "reason": f"Entry pattern not met: prev2={prev2_zone.value}, prev={prev_zone.value}, bull={is_bull}, v_shape={is_v_shape}",
                 "rules": rules_result.summary,
             }
 
-        # ✅ ทุกกฎผ่าน → เตรียมส่ง Order ซื้อ
-        # Entry ที่ราคาเปิดของแท่งถัดไป (= แท่งปัจจุบัน)
-        current_candle = candles_ltf[-1]
-        last_closed_candle = candles_ltf_closed[-1]
-
-        # Entry Price = ราคาเปิดของแท่งปัจจุบัน (แท่งถัดไปจากที่ปิด)
-        entry_price = current_candle.open
+        # ✅ Pattern Entry Matched!
+        entry_price = current_candle.close
 
         # คำนวณ Position Size
-        capital = 10000  # TODO: ดึงจาก Config หรือ Balance
+        capital = 10000
         quantity = capital / entry_price
 
-        # คำนวณ Stop Loss (Structural SL) - ใช้แท่งปิดเท่านั้น
+        # คำนวณ Stop Loss (เหมือน backtest.py _calc_cutloss)
+        candles_ltf_closed = candles_ltf[:-1]
         structural_sl = self._calculate_structural_sl(candles_ltf_closed)
 
-        # คำนวณ Trailing Stop Activation (Fibonacci 100% หรือ 7.5%)
-        # ใช้ timestamp ของแท่งที่ปิดล่าสุด
-        entry_timestamp_ms = int(last_closed_candle.timestamp.timestamp() * 1000)
-        ltf_rows_closed = ltf_rows[:-1]  # ใช้เฉพาะ rows ที่ปิด
-        wave = trace_wave_from_entry(ltf_rows_closed, entry_timestamp_ms)
-
-        if wave:
-            # W-Shape → ใช้ Fib 100%
-            wave1_range = wave['swing_high']['price'] - wave['swing_low_1']['price']
-            activation_price = wave['swing_low_2']['price'] + wave1_range
-            activation_type = "Fib_100_Extension"
-        else:
-            # V-Shape หรือไม่พบ Wave → ใช้ 7.5%
-            activation_price = entry_price * 1.075
-            activation_type = "7.5%_profit"
-
-        # ส่ง Order ไป Worker/D1
+        # ส่ง Order ไป Binance
         order_result = await self._execute_entry_order(
             entry_price=entry_price,
             quantity=quantity,
             structural_sl=structural_sl,
-            activation_price=activation_price,
+            activation_price=entry_price * 1.075,  # Placeholder
             rules=rules_result,
         )
 
@@ -339,9 +609,10 @@ class RealtimeTradingEngine:
             "entry_price": entry_price,
             "quantity": quantity,
             "sl_price": structural_sl,
-            "structural_sl": structural_sl,
-            "activation_price": activation_price,
-            "activation_type": activation_type,
+            "entry_type": "PATTERN",
+            "pattern": f"BLUE→GREEN (prev2={prev2_zone.value}, prev={prev_zone.value})",
+            "is_bull": is_bull,
+            "is_v_shape": is_v_shape,
             "rules": rules_result.summary,
             "order": order_result,
         }
@@ -351,134 +622,179 @@ class RealtimeTradingEngine:
         candles_ltf: List[Candle],
         candles_htf: List[Candle],
         macd_hist: List[float],
-        ltf_rows: List[dict]
+        ltf_rows: List[dict],
+        strong_states: List[dict] = None
     ) -> Dict[str, Any]:
-        """ตรวจสอบเงื่อนไข EXIT (5 เงื่อนไข)
+        """ตรวจสอบเงื่อนไข EXIT (เหมือน backtest.py ทุกประการ)
 
-        ⚠️ Exit Logic แบ่งเป็น 2 ประเภท:
-        1. ใช้แท่งปัจจุบัน (Real-time): Stop Loss, Trailing Stop
-        2. ใช้แท่งปิด (Wait for close): Orange→Red, Divergence, EMA Cross
-
-        Priority:
-        1. Structural Stop Loss (แท่งปัจจุบัน - ตรวจ Low ทันที)
-        2. Trailing Stop Hit (แท่งปัจจุบัน - ตรวจ Low ทันที)
-        3. EMA Crossover Bearish (แท่งปิด)
-        4. Orange → Red (แท่งปิด)
-        5. RSI Divergence (แท่งปิด)
+        Exit Conditions (Priority Order):
+        1. EMA Crossover (Bearish Trend Reversal)
+        2. Trailing Stop Hit
+        3. Orange → Red Pattern
+        4. Strong Sell Signal (Bearish Divergence)
         """
 
-        current_candle = candles_ltf[-1]  # แท่งปัจจุบัน (ยังไม่ปิด)
+        # ตรวจสอบข้อมูลเพียงพอ
+        if len(candles_ltf) < 3 or len(ltf_rows) < 3:
+            return {
+                "status": "holding",
+                "action": "wait",
+                "position": self.position.to_dict(),
+                "reason": "Insufficient data for exit check",
+            }
+
+        current_candle = candles_ltf[-1]
+        current_row = ltf_rows[-1]
         current_price = current_candle.close
-        current_low = current_candle.low  # สำหรับเช็ค Stop Loss
+        current_low = current_candle.low
+        current_avg = (current_candle.open + current_candle.close) / 2
 
-        # === ส่วนที่ 1: ตรวจสอบแบบ Real-time (ใช้แท่งปัจจุบัน) ===
+        prev2_candle = candles_ltf[-3]
+        prev_candle = candles_ltf[-2]
+        current_state = strong_states[-1] if strong_states else None
 
-        # 1️⃣ Structural Stop Loss (ตรวจ Low ทันที)
-        if self.position.sl_price and current_low <= self.position.sl_price:
-            # EXIT: Stop Loss Hit
+        # Get position metadata (stored when entry)
+        entry_price = self.position.entry_price  # Changed from avg_cost
+        entry_trend_was_bullish = getattr(self.position, 'entry_trend_bullish', None)
+
+        # PRIORITY 1: EMA Crossover (Bearish Trend Reversal)
+        # backtest.py line 599-670
+        ema_fast = current_row.get("ema_fast", 0)
+        ema_slow = current_row.get("ema_slow", 0)
+        is_bullish = ema_fast > ema_slow
+
+        if entry_trend_was_bullish and not is_bullish:
+            # Entered in Bull, now Bear → EXIT!
             exit_result = await self._execute_exit_order(
-                reason=ExitReason.STRUCTURAL_SL,
-                exit_price=self.position.sl_price,
-                details=f"Low {current_low:.2f} <= SL {self.position.sl_price:.2f}"
+                reason=ExitReason.EMA_CROSSOVER_BEARISH,
+                exit_price=current_price,
+                details=f"Bullish trend ended: EMA Fast ({ema_fast:.2f}) < EMA Slow ({ema_slow:.2f})"
             )
             return {
                 "status": "exit_signal_detected",
                 "action": "sell",
-                "reason": "STOP_LOSS",
-                "exit_price": self.position.sl_price,
+                "reason": "EMA_CROSSOVER_BEARISH",
+                "exit_price": current_price,
+                "pnl_pct": exit_result.get("pnl_pct", 0),
+                "ema_fast": ema_fast,
+                "ema_slow": ema_slow,
                 "order": exit_result,
             }
 
-        # 2️⃣ Trailing Stop Hit (ตรวจ Low ทันที)
-        # TODO: ต้องมี State เก็บ trailing_stop_price และ trailing_stop_activated
-        # ตอนนี้ข้ามไปก่อน
+        # PRIORITY 2: Trailing Stop Hit
+        # backtest.py line 672-724
+        activation_price = getattr(self.position, 'activation_price', None)
+        trailing_stop_activated = getattr(self.position, 'trailing_stop_activated', False)
+        trailing_stop_price = getattr(self.position, 'trailing_stop_price', None)
+        prev_high = getattr(self.position, 'prev_high', None)
 
-        # === ส่วนที่ 2: ตรวจสอบแบบ Wait for Close (ใช้แท่งปิด) ===
+        if activation_price and trailing_stop_price is not None:
+            # Step 1: Check Activation (Low >= 105% of activation_price)
+            activation_threshold = activation_price * 1.05
 
-        if len(candles_ltf) < 2:
-            return {"status": "holding", "action": "wait", "reason": "Insufficient closed candles"}
+            if not trailing_stop_activated and current_low >= activation_threshold:
+                # ✅ Activated!
+                trailing_stop_activated = True
+                print(f"[TRAILING STOP] Activated at {current_candle.timestamp}: Low={current_low:.2f} >= Threshold={activation_threshold:.2f}")
 
-        candles_ltf_closed = candles_ltf[:-1]
-        candles_htf_closed = candles_htf[:-1]
-        ltf_rows_closed = ltf_rows[:-1]
+            # Step 2: Check if SL Hit (only after activation)
+            if trailing_stop_activated and current_low <= trailing_stop_price:
+                # 🚪 EXIT! Hit Trailing Stop
+                exit_result = await self._execute_exit_order(
+                    reason=ExitReason.TRAILING_STOP,
+                    exit_price=trailing_stop_price,  # Exit at SL price, not Low
+                    details=f"Trailing Stop Hit: Low={current_low:.2f} <= SL={trailing_stop_price:.2f}"
+                )
+                return {
+                    "status": "exit_signal_detected",
+                    "action": "sell",
+                    "reason": "TRAILING_STOP",
+                    "exit_price": trailing_stop_price,
+                    "pnl_pct": exit_result.get("pnl_pct", 0),
+                    "sl_price": trailing_stop_price,
+                    "current_low": current_low,
+                    "order": exit_result,
+                }
 
-        # คำนวณ RSI (ใช้แท่งปิด)
-        closes_closed = [c.close for c in candles_ltf_closed]
-        rsi_values = calculate_rsi(closes_closed, period=14)
+            # Step 3: Update Trailing Stop (can only rise)
+            # SL = Current Avg Price × 93% (7% trailing distance)
+            trailing_distance = 0.07
+            potential_sl = current_avg * (1 - trailing_distance)
 
-        # 3️⃣ EMA Crossover Bearish (ใช้แท่งปิด)
-        # TODO: ต้องเพิ่ม ema_fast, ema_slow ใน Candle dataclass
-        # ตอนนี้ข้ามไปก่อน
+            if potential_sl > trailing_stop_price:
+                old_sl = trailing_stop_price
+                trailing_stop_price = potential_sl
+                prev_high = current_avg
 
-        # 4️⃣ CDC Pattern Orange → Red (ใช้แท่งปิด)
-        # ตรวจสอบ Action Zone
-        try:
-            closes_for_zone = [row["close"] for row in ltf_rows_closed]
-            action_zones = compute_action_zone(closes_for_zone)
+                price_change_pct = ((current_avg - (prev_high or entry_price)) / (prev_high or entry_price) * 100) if (prev_high or entry_price) > 0 else 0
 
-            if len(action_zones) >= 2:
-                prev2_zone = action_zones[-3]["zone"] if len(action_zones) >= 3 else None
-                prev_zone = action_zones[-2]["zone"] if len(action_zones) >= 2 else None
+                print(f"[TRAILING STOP] Updated: {old_sl:.2f} -> {trailing_stop_price:.2f} (Avg Price: {current_avg:.2f}, {price_change_pct:+.2f}%)")
 
-                if prev2_zone == "orange" and prev_zone == "red":
-                    # EXIT: Orange → Red detected
-                    exit_result = await self._execute_exit_order(
-                        reason=ExitReason.CDC_RED_EXIT,
-                        exit_price=current_price,
-                        details="CDC Pattern Orange → Red"
-                    )
-                    return {
-                        "status": "exit_signal_detected",
-                        "action": "sell",
-                        "reason": "ORANGE_RED",
-                        "exit_price": current_price,
-                        "order": exit_result,
-                    }
-        except Exception as e:
-            print(f"[{self.pair}] Action Zone check error: {e}")
+                # Step 4: บันทึกกลับไป D1
+                await self._update_trailing_stop_state(
+                    trailing_stop_activated=trailing_stop_activated,
+                    trailing_stop_price=trailing_stop_price,
+                    prev_high=prev_high
+                )
 
-        # 5️⃣ RSI Divergence (STRONG_SELL) - ใช้แท่งปิด
-        lows = [c.low for c in candles_ltf_closed]
-        highs = [c.high for c in candles_ltf_closed]
-        # สร้าง trend list (ถ้า cdc_color = GREEN → bullish)
-        trends = [c.cdc_color == CDCColor.GREEN for c in candles_ltf_closed]
+        # PRIORITY 3: Orange → Red Pattern
+        # backtest.py line 759-825
+        prev2_zone = prev2_candle.cdc_color
+        prev_zone = prev_candle.cdc_color
 
-        detector = DivergenceDetector()
-        divergences = detector.detect(rsi_values, lows, highs, trends)
+        if prev2_zone == CDCColor.ORANGE and prev_zone == CDCColor.RED:
+            exit_result = await self._execute_exit_order(
+                reason=ExitReason.ORANGE_RED,
+                exit_price=current_price,
+                details=f"Orange → Red pattern detected"
+            )
+            return {
+                "status": "exit_signal_detected",
+                "action": "sell",
+                "reason": "ORANGE_RED",
+                "exit_price": current_price,
+                "pnl_pct": exit_result.get("pnl_pct", 0),
+                "pattern": f"ORANGE→RED (prev2={prev2_zone.value}, prev={prev_zone.value})",
+                "order": exit_result,
+            }
 
-        # หา Bearish Divergence ล่าสุด
-        for div in reversed(divergences):
-            if div.type == DivergenceType.BEARISH:
-                # ตรวจสอบว่า Divergence เกิดหลัง Entry หรือไม่
-                if self.position.entry_bar_index and div.end_index > self.position.entry_bar_index:
-                    # EXIT: Bearish Divergence detected
-                    exit_result = await self._execute_exit_order(
-                        reason=ExitReason.DIVERGENCE_EXIT,
-                        exit_price=current_price,
-                        details=f"Bearish Divergence RSI:{div.rsi_start:.1f}→{div.rsi_end:.1f}"
-                    )
-                    return {
-                        "status": "exit_signal_detected",
-                        "action": "sell",
-                        "reason": "STRONG_SELL",
-                        "exit_price": current_price,
-                        "divergence": {
-                            "rsi_start": div.rsi_start,
-                            "rsi_end": div.rsi_end,
-                            "price_start": div.price_start,
-                            "price_end": div.price_end,
-                        },
-                        "order": exit_result,
-                    }
-                break
+        # PRIORITY 4: Strong Sell Signal (Bearish Divergence)
+        # backtest.py line 827-872
+        if current_state and current_state.get("special_signal") == "SELL":
+            exit_result = await self._execute_exit_order(
+                reason=ExitReason.STRONG_SELL,
+                exit_price=current_price,
+                details=f"Bearish Divergence signal"
+            )
+            return {
+                "status": "exit_signal_detected",
+                "action": "sell",
+                "reason": "STRONG_SELL",
+                "exit_price": current_price,
+                "pnl_pct": exit_result.get("pnl_pct", 0),
+                "special_signal": "SELL",
+                "order": exit_result,
+            }
 
         # ไม่มีเงื่อนไข EXIT - ยังถือต่อ
+        trailing_stop_info = "Not configured"
+        if activation_price:
+            activation_threshold = activation_price * 1.05
+            trailing_stop_info = f"Activated={trailing_stop_activated}, SL={trailing_stop_price:.2f}, Threshold={activation_threshold:.2f}"
+
+        exit_checks = {
+            "ema_crossover": f"Bull={is_bullish} (Fast={ema_fast:.2f}, Slow={ema_slow:.2f})",
+            "trailing_stop": trailing_stop_info,
+            "orange_red": f"prev2={prev2_zone.value}, prev={prev_zone.value}",
+            "strong_sell": current_state.get("special_signal") if current_state else None,
+        }
+
         return {
             "status": "holding",
             "action": "wait",
             "position": self.position.to_dict(),
             "current_price": current_price,
-            "sl_distance": current_price - (self.position.sl_price or 0),
+            "exit_checks": exit_checks,
         }
 
     def _calculate_structural_sl(self, candles: List[Candle]) -> float:
@@ -518,41 +834,149 @@ class RealtimeTradingEngine:
         activation_price: float,
         rules
     ) -> Dict[str, Any]:
-        """ส่ง Order ซื้อไป D1 Worker"""
+        """ส่ง Order ซื้อไป Binance Testnet และบันทึกใน D1 Worker
 
-        order_payload = {
-            "pair": self.pair,
-            "order_type": "ENTRY",
-            "side": "BUY",
-            "requested_qty": quantity,
-            "filled_qty": quantity,
-            "avg_price": entry_price,
-            "order_id": f"realtime-entry-{uuid.uuid4().hex[:8]}",
-            "status": "NEW",
-            "entry_reason": "CDC_RULES",
-            "rule_1_cdc_green": rules.rule_1_cdc_green.passed,
-            "rule_2_leading_red": rules.rule_2_leading_red.passed,
-            "rule_3_leading_signal": rules.rule_3_leading_signal.passed,
-            "rule_4_pattern": rules.rule_4_pattern.passed,
-            "entry_price": entry_price,
-            "w_low": structural_sl,
-            "sl_price": structural_sl,
-            "requested_at": dt.datetime.now().isoformat(),
-        }
+        Flow:
+        1. เช็ค Balance
+        2. Place Market Order ที่ Binance Testnet
+        3. รอรับ Order ID และ Filled Info จาก Binance
+        4. บันทึก Order ลง D1 Worker ด้วยสถานะ FILLED/PENDING
+        """
 
-        # ส่งไป Worker
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{_WORKER_URL}/orders",
-                json=order_payload,
-                headers=_auth_headers(),
-                timeout=10.0
+        try:
+            # 1. สร้าง Binance Client
+            binance_client = _make_binance_client()
+
+            # 2. เช็ค Balance (USDT สำหรับ BUY)
+            symbol = self.pair.replace("/", "")  # BTC/USDT → BTCUSDT
+            base, quote = self.pair.split("/")
+
+            balance = binance_client.fetch_balance()
+            quote_free = balance.get(quote, {}).get("free", 0.0)
+
+            required_usdt = entry_price * quantity
+
+            if quote_free < required_usdt:
+                raise RuntimeError(
+                    f"Insufficient balance: need {required_usdt:.2f} {quote}, "
+                    f"have {quote_free:.2f} {quote}"
+                )
+
+            # 3. Adjust quantity to exchange precision
+            quantity = float(binance_client.amount_to_precision(symbol, quantity))
+
+            # 4. Place MARKET BUY Order ที่ Binance Testnet
+            binance_order = binance_client.create_order(
+                symbol=symbol,
+                type="market",
+                side="buy",
+                amount=quantity,
             )
-            resp.raise_for_status()
 
-        print(f"✅ [ENTRY] {self.pair} @ {entry_price:.2f} | Qty: {quantity:.6f} | SL: {structural_sl:.2f}")
+            # 5. ดึงข้อมูล Order จาก Binance Response
+            info = binance_order.get("info", {})
+            binance_order_id = str(info.get("orderId") or binance_order.get("id"))
+            binance_status = info.get("status", "UNKNOWN")  # NEW, FILLED, PARTIALLY_FILLED, etc.
 
-        return {"order_id": order_payload["order_id"], "status": "submitted"}
+            filled_qty = float(info.get("executedQty") or quantity)
+
+            # คำนวณ avg_price จาก cummulativeQuoteQty / executedQty
+            avg_price = entry_price
+            try:
+                cumm_quote = float(info.get("cummulativeQuoteQty") or 0)
+                if filled_qty > 0 and cumm_quote > 0:
+                    avg_price = cumm_quote / filled_qty
+            except Exception:
+                pass
+
+            # 6. บันทึก Order ลง D1 Worker
+            # ใช้สถานะจาก Binance: FILLED/PARTIALLY_FILLED/PENDING
+            worker_status = "FILLED" if binance_status == "FILLED" else "PENDING"
+
+            order_payload = {
+                "pair": self.pair,
+                "order_type": "ENTRY",
+                "side": "BUY",
+                "requested_qty": quantity,
+                "filled_qty": filled_qty,
+                "avg_price": avg_price,
+                "order_id": binance_order_id,
+                "status": worker_status,
+                "entry_reason": "CDC_RULES",
+                "rule_1_cdc_green": rules.rule_1_cdc_green.passed if rules else False,
+                "rule_2_leading_red": rules.rule_2_leading_red.passed if rules else False,
+                "rule_3_leading_signal": rules.rule_3_leading_signal.passed if rules else False,
+                "rule_4_pattern": rules.rule_4_pattern.passed if rules else False,
+                "entry_price": avg_price,
+                "w_low": structural_sl,
+                "sl_price": structural_sl,
+                "activation_price": activation_price,  # เพิ่ม Activation Price
+                "requested_at": dt.datetime.now().isoformat(),
+                "filled_at": dt.datetime.now().isoformat() if worker_status == "FILLED" else None,
+            }
+
+            # ส่งไป Worker
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{_WORKER_URL}/orders",
+                    json=order_payload,
+                    headers=_auth_headers(),
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+
+            # 7. Update Position State ใน D1 (เพิ่ม entry_trend_bullish และ activation_price)
+            # ดึง EMA เพื่อบันทึก Trend ตอน Entry
+            ltf_rows_temp = await self.market_client.get_candles(
+                pair=self.pair,
+                interval=self.ltf_interval,
+                limit=1
+            )
+            current_row = ltf_rows_temp[-1] if ltf_rows_temp else {}
+            ema_fast = current_row.get("ema_fast", 0)
+            ema_slow = current_row.get("ema_slow", 0)
+            entry_trend_bullish = ema_fast > ema_slow
+
+            position_payload = {
+                "pair": self.pair,
+                "status": "LONG",
+                "entry_price": avg_price,
+                "entry_time": dt.datetime.now().isoformat(),
+                "w_low": structural_sl,
+                "sl_price": structural_sl,
+                "qty": filled_qty,
+                "activation_price": activation_price,
+                "entry_trend_bullish": entry_trend_bullish,
+                "trailing_stop_activated": False,
+                "trailing_stop_price": structural_sl,  # เริ่มต้นด้วย structural SL
+                "prev_high": entry_price,  # เริ่มต้นด้วย entry price
+            }
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{_WORKER_URL}/positions",
+                    json=position_payload,
+                    headers=_auth_headers(),
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+
+            return {
+                "order_id": binance_order_id,
+                "status": worker_status,
+                "binance_status": binance_status,
+                "filled_qty": filled_qty,
+                "avg_price": avg_price,
+                "binance_order": binance_order,
+                "position_updated": True,
+            }
+
+        except ccxt.InsufficientFunds as exc:
+            raise RuntimeError(f"Binance: Insufficient funds - {exc}") from exc
+        except ccxt.BaseError as exc:
+            raise RuntimeError(f"Binance error: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Order placement failed: {exc}") from exc
 
     async def _execute_exit_order(
         self,
@@ -560,43 +984,117 @@ class RealtimeTradingEngine:
         exit_price: float,
         details: str = ""
     ) -> Dict[str, Any]:
-        """ส่ง Order ขายไป D1 Worker"""
+        """ส่ง Order ขายไป Binance Testnet และบันทึกใน D1 Worker
+
+        Flow:
+        1. เช็ค Position ที่เหลือ
+        2. Place Market SELL Order ที่ Binance Testnet
+        3. รอรับ Order ID และ Filled Info จาก Binance
+        4. บันทึก Order ลง D1 Worker ด้วยสถานะ FILLED/PENDING
+        """
 
         if not self.position or not self.position.qty:
             raise ValueError("No position to exit")
 
-        pnl_pct = ((exit_price - self.position.entry_price) / self.position.entry_price) * 100 if self.position.entry_price else 0
+        try:
+            # 1. สร้าง Binance Client
+            binance_client = _make_binance_client()
 
-        order_payload = {
-            "pair": self.pair,
-            "order_type": "EXIT",
-            "side": "SELL",
-            "requested_qty": self.position.qty,
-            "filled_qty": self.position.qty,
-            "avg_price": exit_price,
-            "order_id": f"realtime-exit-{uuid.uuid4().hex[:8]}",
-            "status": "NEW",
-            "exit_reason": f"{reason.value} | {details}",
-            "entry_price": self.position.entry_price,
-            "exit_price": exit_price,
-            "pnl_pct": pnl_pct,
-            "sl_price": self.position.sl_price,
-            "requested_at": dt.datetime.now().isoformat(),
-        }
+            # 2. เช็ค Balance (Base Asset สำหรับ SELL)
+            symbol = self.pair.replace("/", "")  # BTC/USDT → BTCUSDT
+            base, quote = self.pair.split("/")
 
-        # ส่งไป Worker
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{_WORKER_URL}/orders",
-                json=order_payload,
-                headers=_auth_headers(),
-                timeout=10.0
+            balance = binance_client.fetch_balance()
+            base_free = balance.get(base, {}).get("free", 0.0)
+
+            quantity = self.position.qty
+
+            if base_free < quantity:
+                raise RuntimeError(
+                    f"Insufficient balance: need {quantity:.8f} {base}, "
+                    f"have {base_free:.8f} {base}"
+                )
+
+            # 3. Adjust quantity to exchange precision
+            quantity = float(binance_client.amount_to_precision(symbol, quantity))
+
+            # 4. Place MARKET SELL Order ที่ Binance Testnet
+            binance_order = binance_client.create_order(
+                symbol=symbol,
+                type="market",
+                side="sell",
+                amount=quantity,
             )
-            resp.raise_for_status()
 
-        print(f"❌ [EXIT] {self.pair} @ {exit_price:.2f} | Reason: {reason.value} | PnL: {pnl_pct:.2f}%")
+            # 5. ดึงข้อมูล Order จาก Binance Response
+            info = binance_order.get("info", {})
+            binance_order_id = str(info.get("orderId") or binance_order.get("id"))
+            binance_status = info.get("status", "UNKNOWN")
 
-        return {"order_id": order_payload["order_id"], "status": "submitted", "pnl_pct": pnl_pct}
+            filled_qty = float(info.get("executedQty") or quantity)
+
+            # คำนวณ avg_price จาก cummulativeQuoteQty / executedQty
+            avg_price = exit_price
+            try:
+                cumm_quote = float(info.get("cummulativeQuoteQty") or 0)
+                if filled_qty > 0 and cumm_quote > 0:
+                    avg_price = cumm_quote / filled_qty
+            except Exception:
+                pass
+
+            # 6. คำนวณ PnL
+            pnl_pct = ((avg_price - self.position.entry_price) / self.position.entry_price) * 100 if self.position.entry_price else 0
+            pnl_amount = (avg_price - self.position.entry_price) * filled_qty if self.position.entry_price else 0
+
+            # 7. บันทึก Order ลง D1 Worker
+            worker_status = "FILLED" if binance_status == "FILLED" else "PENDING"
+
+            order_payload = {
+                "pair": self.pair,
+                "order_type": "EXIT",
+                "side": "SELL",
+                "requested_qty": quantity,
+                "filled_qty": filled_qty,
+                "avg_price": avg_price,
+                "order_id": binance_order_id,  # ใช้ Order ID จาก Binance
+                "status": worker_status,
+                "exit_reason": f"{reason.value} | {details}",
+                "entry_price": self.position.entry_price,
+                "exit_price": avg_price,
+                "pnl": pnl_amount,
+                "pnl_pct": pnl_pct,
+                "sl_price": self.position.sl_price,
+                "requested_at": dt.datetime.now().isoformat(),
+                "filled_at": dt.datetime.now().isoformat() if worker_status == "FILLED" else None,
+            }
+
+            # ส่งไป Worker
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{_WORKER_URL}/orders",
+                    json=order_payload,
+                    headers=_auth_headers(),
+                    timeout=10.0
+                )
+                resp.raise_for_status()
+
+            return {
+                "order_id": binance_order_id,
+                "status": worker_status,
+                "binance_status": binance_status,
+                "filled_qty": filled_qty,
+                "avg_price": avg_price,
+                "pnl_pct": pnl_pct,
+                "pnl_amount": pnl_amount,
+                "binance_order": binance_order,
+            }
+
+        except ccxt.InsufficientFunds as exc:
+            raise RuntimeError(f"Binance: Insufficient funds - {exc}") from exc
+        except ccxt.BaseError as exc:
+            raise RuntimeError(f"Binance error: {exc}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Order placement failed: {exc}") from exc
 
 
 __all__ = ["RealtimeTradingEngine"]

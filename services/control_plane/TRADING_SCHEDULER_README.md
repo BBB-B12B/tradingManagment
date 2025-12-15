@@ -67,7 +67,7 @@ POST /bot/scheduler/start
 
 **cURL Example:**
 ```bash
-curl -X POST "http://localhost:8000/bot/scheduler/start" \
+curl -X POST "http://localhost:5001/bot/scheduler/start" \
   -H "Content-Type: application/json" \
   -d '{
     "pairs": ["BTC/USDT"],
@@ -93,7 +93,7 @@ POST /bot/scheduler/stop
 
 **cURL Example:**
 ```bash
-curl -X POST "http://localhost:8000/bot/scheduler/stop"
+curl -X POST "http://localhost:5001/bot/scheduler/stop"
 ```
 
 ---
@@ -122,24 +122,54 @@ GET /bot/scheduler/status
 
 **cURL Example:**
 ```bash
-curl "http://localhost:8000/bot/scheduler/status"
+curl "http://localhost:5001/bot/scheduler/status"
 ```
 
 ---
 
 ## วิธีใช้งาน
 
-### 1. เริ่ม Control Plane Server
+### 1. เริ่ม Development Environment (แนะนำ)
+
+ใช้ `dev-all.sh` script ที่จะ start ทั้ง Worker และ Control Plane พร้อมกัน:
 
 ```bash
 cd services/control_plane
-poetry run uvicorn src.app:app --reload --host 0.0.0.0 --port 8000
+./scripts/dev-all.sh
+```
+
+**หยุด**: กด `Ctrl + C`
+
+**Restart**:
+```bash
+./scripts/kill-all.sh && ./scripts/dev-all.sh
+```
+
+**ดู processes ที่ทำงาน**:
+```bash
+ps aux | grep -E "(wrangler|esbuild|uvicorn)" | grep -v grep
+```
+
+### 1.1 เริ่มแบบแยก (Manual)
+
+หากต้องการ start แบบแยก:
+
+**Start Cloudflare Worker:**
+```bash
+cd services/cloudflare_api
+npx wrangler dev --port 8787
+```
+
+**Start Control Plane:**
+```bash
+cd services/control_plane
+CLOUDFLARE_WORKER_URL=http://localhost:8787 uvicorn src.app:app --reload --host 0.0.0.0 --port 5001
 ```
 
 ### 2. เริ่ม Scheduler ผ่าน API
 
 ```bash
-curl -X POST "http://localhost:8000/bot/scheduler/start" \
+curl -X POST "http://localhost:5001/bot/scheduler/start" \
   -H "Content-Type: application/json" \
   -d '{
     "pairs": ["BTC/USDT"],
@@ -168,7 +198,7 @@ Pairs: BTC/USDT
 ### 4. หยุด Scheduler
 
 ```bash
-curl -X POST "http://localhost:8000/bot/scheduler/stop"
+curl -X POST "http://localhost:5001/bot/scheduler/stop"
 ```
 
 ---
@@ -217,7 +247,7 @@ Default: ทุก 1 นาที
 
 เปลี่ยนเป็นทุก 5 นาที:
 ```bash
-curl -X POST "http://localhost:8000/bot/scheduler/start" \
+curl -X POST "http://localhost:5001/bot/scheduler/start" \
   -H "Content-Type: application/json" \
   -d '{
     "pairs": ["BTC/USDT"],
@@ -228,7 +258,7 @@ curl -X POST "http://localhost:8000/bot/scheduler/start" \
 ### เพิ่มหลายคู่เงิน
 
 ```bash
-curl -X POST "http://localhost:8000/bot/scheduler/start" \
+curl -X POST "http://localhost:5001/bot/scheduler/start" \
   -H "Content-Type: application/json" \
   -d '{
     "pairs": ["BTC/USDT", "ETH/USDT", "BNB/USDT"],

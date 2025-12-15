@@ -45,8 +45,8 @@ def check_leading_red(
     if current_htf.cdc_color != CDCColor.GREEN:
         return RuleResult(
             passed=False,
-            reason=f"HTF is not GREEN (current: {current_htf.cdc_color})",
-            metadata={"htf_color": current_htf.cdc_color}
+            reason=f"HTF is not GREEN (current: {current_htf.cdc_color.value})",
+            metadata={"htf_color": current_htf.cdc_color.value}
         )
 
     # Check LTF current is GREEN
@@ -54,8 +54,8 @@ def check_leading_red(
     if current_ltf.cdc_color != CDCColor.GREEN:
         return RuleResult(
             passed=False,
-            reason=f"LTF current bar is not GREEN (current: {current_ltf.cdc_color})",
-            metadata={"ltf_color": current_ltf.cdc_color}
+            reason=f"LTF current bar is not GREEN (current: {current_ltf.cdc_color.value})",
+            metadata={"ltf_color": current_ltf.cdc_color.value}
         )
 
     # Look for RED bar in LTF within window
@@ -84,8 +84,8 @@ def check_leading_red(
         metadata={
             "red_bars_ago": red_bars_found,
             "closest_red": min(red_bars_found),
-            "htf_color": current_htf.cdc_color,
-            "ltf_color": current_ltf.cdc_color,
+            "htf_color": current_htf.cdc_color.value,
+            "ltf_color": current_ltf.cdc_color.value,
         }
     )
 

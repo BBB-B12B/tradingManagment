@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import uuid
+import json
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import httpx
@@ -23,6 +25,10 @@ _BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 _BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
 # สำหรับบัญชีที่มี base เริ่มต้นค้างอยู่ (เช่น 1 BTC) ให้หักออกเมื่อประเมินโหมด ENTRY/EXIT
 _BASE_BALANCE_OFFSET = float(os.getenv("BASE_BALANCE_OFFSET", "1.0"))
+
+# Scheduler state file for auto-restart after reload
+_SRC_DIR = Path(__file__).resolve().parent.parent
+_SCHEDULER_STATE_FILE = _SRC_DIR / ".scheduler_state.json"
 
 
 def _auth_headers() -> Dict[str, str]:
@@ -49,7 +55,7 @@ def _parse_float(val: Any) -> float:
 
 
 def _executed_status(status: str) -> bool:
-    """Return True if status indicates an executed/partial order (not just NEW/OPEN)."""
+    """Return True if status indicates an executed/partial order (not PENDING)."""
     s = (status or "").upper()
     return s in {"FILLED", "CLOSED", "PARTIALLY_FILLED", "PARTIAL_FILL"}
 
@@ -337,7 +343,7 @@ async def run_live(payload: LiveRunRequest) -> Dict[str, Any]:
                 "filled_qty": qty,
                 "avg_price": trade.get("entry_price"),
                 "order_id": f"live-entry-{uuid.uuid4().hex[:8]}",
-                "status": "NEW",
+                "status": "PENDING",
                 "entry_reason": "CDC_RULES",
                 "exit_reason": None,
                 "rule_1_cdc_green": bool(rules.get("rule_1_cdc_green")),
@@ -370,7 +376,7 @@ async def run_live(payload: LiveRunRequest) -> Dict[str, Any]:
                 "filled_qty": qty,
                 "avg_price": trade.get("exit_price"),
                 "order_id": f"live-exit-{uuid.uuid4().hex[:8]}",
-                "status": "NEW",
+                "status": "PENDING",
                 "entry_reason": None,
                 "exit_reason": f"{exit_reason} | pos_qty={qty:.8f} | avg_cost={position.get('avg_cost', 0.0):.2f}",
                 "rule_1_cdc_green": bool(rules.get("rule_1_cdc_green")),
@@ -413,7 +419,7 @@ _trading_scheduler: Optional[TradingScheduler] = None
 
 class SchedulerStartRequest(BaseModel):
     pairs: List[str]
-    interval_minutes: int = 1
+    interval_minutes: float = 1.0
 
 
 @router.post("/scheduler/start")
@@ -434,6 +440,9 @@ async def start_scheduler(payload: SchedulerStartRequest) -> Dict[str, Any]:
     if _trading_scheduler and _trading_scheduler.is_running:
         raise HTTPException(status_code=400, detail="Scheduler is already running. Stop it first.")
 
+    if payload.interval_minutes <= 0:
+        raise HTTPException(status_code=400, detail="interval_minutes ต้องมากกว่า 0 (รองรับทศนิยม เช่น 0.5 = 30 วินาที)")
+
     _trading_scheduler = TradingScheduler()
 
     try:
@@ -441,6 +450,15 @@ async def start_scheduler(payload: SchedulerStartRequest) -> Dict[str, Any]:
             pairs=payload.pairs,
             interval_minutes=payload.interval_minutes
         )
+
+        # Save scheduler state for auto-restart after reload
+        state = {
+            "pairs": payload.pairs,
+            "interval_minutes": payload.interval_minutes,
+        }
+        _SCHEDULER_STATE_FILE.write_text(json.dumps(state, indent=2))
+        print(f"💾 Saved scheduler state: {state}")
+
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to start scheduler: {exc}") from exc
 
@@ -466,6 +484,12 @@ async def stop_scheduler() -> Dict[str, Any]:
 
     try:
         await _trading_scheduler.stop()
+
+        # Delete scheduler state file (user intentionally stopped it)
+        if _SCHEDULER_STATE_FILE.exists():
+            _SCHEDULER_STATE_FILE.unlink()
+            print("🗑️ Deleted scheduler state file")
+
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to stop scheduler: {exc}") from exc
 
@@ -496,3 +520,54 @@ async def get_scheduler_status() -> Dict[str, Any]:
         "status": "running" if scheduler_status["is_running"] else "stopped",
         **scheduler_status,
     }
+
+
+@router.get("/scheduler/logs")
+async def get_scheduler_logs() -> Dict[str, Any]:
+    """ดึง log ล่าสุดจาก Scheduler (ใช้แสดงบน UI)"""
+    global _trading_scheduler
+
+    if not _trading_scheduler:
+        return {"logs": []}
+
+    return {"logs": _trading_scheduler.get_logs()}
+
+
+@router.get("/summary")
+async def get_trading_summary() -> Dict[str, Any]:
+    """ดึงสรุปสถานะการเทรดทั้งหมด รวม Balance และ Position"""
+    try:
+        # 1. ดึง Orders จาก Worker
+        orders_data = await order_sync.fetch_worker_orders()
+        orders = orders_data.get("orders", [])
+
+        # 2. ดึง Positions จาก Worker
+        async with httpx.AsyncClient() as client:
+            positions_resp = await client.get(
+                f"{os.getenv('CLOUDFLARE_WORKER_URL', 'http://localhost:8787')}/positions",
+                headers={"Authorization": f"Bearer {os.getenv('WORKER_API_KEY', 'dev-key')}"},
+                timeout=10.0
+            )
+            positions_resp.raise_for_status()
+            positions_data = positions_resp.json()
+            positions = positions_data.get("positions", [])
+
+        # 3. คำนวณสรุป
+        total_entries = len([o for o in orders if o.get("order_type") == "ENTRY" and o.get("status") == "FILLED"])
+        total_exits = len([o for o in orders if o.get("order_type") == "EXIT" and o.get("status") == "FILLED"])
+
+        # หา position ที่ LONG
+        long_positions = [p for p in positions if p.get("status") == "LONG"]
+
+        summary = {
+            "total_entries": total_entries,
+            "total_exits": total_exits,
+            "active_positions": len(long_positions),
+            "positions": long_positions,
+            "mode": "EXIT" if long_positions else "ENTRY",
+        }
+
+        return summary
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get summary: {e}")
