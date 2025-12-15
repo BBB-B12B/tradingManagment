@@ -1,19 +1,21 @@
 """Real-time Trading Engine - ตรวจสอบเงื่อนไข Entry/Exit แบบ Real-time
 
-This module implements real-time trading logic with full Entry/Exit conditions:
+This module implements real-time trading logic with Entry/Exit conditions:
 
-Entry Conditions (4 Rules):
-1. CDC Color = GREEN (both LTF and HTF)
-2. Leading Red exists
-3. Leading Signal (Momentum Flip + Higher Low)
-4. Pattern = W-Shape (not V-Shape)
+Entry Requirements (ต้องผ่านทั้งหมด):
+1. ✅ LTF: BLUE→GREEN transition (prev2=blue, prev=green)
+2. ✅ LTF: Bull trend (EMA Fast > EMA Slow)
+3. ✅ HTF: Bull trend (EMA Fast > EMA Slow)
+4. ✅ Not V-shape pattern
+5. ✅ Entry price > Cutloss price
 
-Exit Conditions (5 Conditions):
+❌ Divergence ไม่ใช้สำหรับ Entry (ใช้เฉพาะ Exit)
+
+Exit Conditions (Priority Order):
 1. EMA Crossover Bearish (Trend Reversal)
 2. Trailing Stop Hit
 3. CDC Pattern Orange → Red
-4. RSI Divergence (STRONG_SELL)
-5. Structural Stop Loss
+4. RSI Divergence (STRONG_SELL) - Bearish Divergence สำหรับ Exit เท่านั้น
 
 ใช้งาน:
     engine = RealtimeTradingEngine(pair="BTC/USDT")
@@ -22,6 +24,7 @@ Exit Conditions (5 Conditions):
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
@@ -373,7 +376,7 @@ class RealtimeTradingEngine:
         candles_htf = _decorate_candles(htf_rows)
         macd_hist = _macd_histogram([row["close"] for row in ltf_rows])
 
-        # คำนวณ RSI และ Divergence (สำหรับ PRIORITY 1 Entry)
+        # คำนวณ RSI และ Divergence (สำหรับ Exit เท่านั้น)
         rsi_values = calculate_rsi([row["close"] for row in ltf_rows], period=14)
         rsi_clean = [x for x in rsi_values if x is not None]
         lows = [c.low for c in candles_ltf[-len(rsi_clean):]]
@@ -386,7 +389,7 @@ class RealtimeTradingEngine:
         # สร้าง divergence lookup by end index
         div_by_end_idx = {div.end_index: div for div in divergences}
 
-        # คำนวณ Strong States (เหมือน backtest.py)
+        # คำนวณ Strong States (ใช้สำหรับ Bearish Divergence Exit เท่านั้น)
         strong_states = self._calculate_strong_states(
             candles_ltf, rsi_values, div_by_end_idx
         )
@@ -399,7 +402,11 @@ class RealtimeTradingEngine:
         rsi_values: List[Optional[float]],
         div_by_end_idx: dict
     ) -> List[dict]:
-        """คำนวณ Strong States สำหรับ Divergence Entry (เหมือน backtest.py line 123-188)"""
+        """คำนวณ Strong States สำหรับ Bearish Divergence Exit เท่านั้น
+
+        ❌ ไม่ใช้ Bullish Divergence สำหรับ Entry อีกต่อไป
+        ✅ ใช้เฉพาะ Bearish Divergence (SELL signal) สำหรับ Exit
+        """
         states = []
         bullish_active = False
         bullish_div_idx: Optional[int] = None
@@ -473,6 +480,75 @@ class RealtimeTradingEngine:
 
         return states
 
+    def _build_rules_detail(
+        self,
+        rules_result,
+        candles_ltf: List[Candle],
+        candles_htf: List[Candle]
+    ) -> Dict[str, Any]:
+        """สร้าง rules_detail สำหรับ UI"""
+        # ดึงข้อมูล CDC colors
+        ltf_prev2_color = candles_ltf[-3].cdc_color.value if len(candles_ltf) >= 3 else "unknown"
+        ltf_prev1_color = candles_ltf[-2].cdc_color.value if len(candles_ltf) >= 2 else "unknown"
+        ltf_curr_color = candles_ltf[-1].cdc_color.value if len(candles_ltf) >= 1 else "unknown"
+
+        htf_prev2_color = candles_htf[-3].cdc_color.value if len(candles_htf) >= 3 else "unknown"
+        htf_prev1_color = candles_htf[-2].cdc_color.value if len(candles_htf) >= 2 else "unknown"
+        htf_curr_color = candles_htf[-1].cdc_color.value if len(candles_htf) >= 1 else "unknown"
+
+        # ดึงข้อมูล Pattern จาก rules_result
+        pattern_result = rules_result.rule_4_pattern if hasattr(rules_result, 'rule_4_pattern') else None
+        pattern_meta = pattern_result.metadata if pattern_result else {}
+        pattern_type = pattern_meta.get("pattern")
+
+        # PatternType enum values: W_SHAPE="W", V_SHAPE="V", NONE="NONE"
+        is_w_shape = pattern_type == "W" if pattern_type else False
+        is_v_shape = pattern_type == "V" if pattern_type else False
+
+        # ดึงข้อมูล W-shape details
+        pattern_details = pattern_meta.get("details", {})
+        w_left = pattern_details.get("low1")
+        w_mid = pattern_details.get("mid_high")
+        w_right = pattern_details.get("low2")
+
+        # ดึง metadata จาก rule_1_cdc_green
+        rule_1_meta = rules_result.rule_1_cdc_green.metadata if hasattr(rules_result.rule_1_cdc_green, 'metadata') else {}
+        htf_transition = rule_1_meta.get("htf_transition")
+        ltf_transition = rule_1_meta.get("ltf_transition")
+
+        # สร้าง metadata สำหรับ LTF colors (ใช้ในการแสดงผล)
+        ltf_colors_metadata = {
+            "prev2": ltf_prev2_color,
+            "prev1": ltf_prev1_color,
+            "current": ltf_curr_color
+        }
+
+        # สร้าง metadata สำหรับ Pattern (รวม W-shape details)
+        pattern_metadata = {
+            "is_w_shape": is_w_shape,
+            "is_v_shape": is_v_shape,
+            "pattern_type": pattern_type or "NONE",
+        }
+
+        # เพิ่ม W-shape details ถ้ามี
+        if w_left is not None and w_mid is not None and w_right is not None:
+            pattern_metadata["w_left"] = w_left
+            pattern_metadata["w_mid"] = w_mid
+            pattern_metadata["w_right"] = w_right
+
+        return {
+            "rule_1_cdc_green": {
+                "passed": rules_result.rule_1_cdc_green.passed,
+                "reason": rules_result.rule_1_cdc_green.reason,
+                "metadata": ltf_colors_metadata  # ส่งแบบ flat เพื่อให้ UI อ่านได้
+            },
+            "rule_4_pattern": {
+                "passed": True,  # Always true (info only)
+                "reason": f"W-shape: {is_w_shape}, V-shape: {is_v_shape}",
+                "metadata": pattern_metadata
+            }
+        }
+
     async def _check_entry(
         self,
         candles_ltf: List[Candle],
@@ -481,29 +557,29 @@ class RealtimeTradingEngine:
         ltf_rows: List[dict],
         strong_states: List[dict]
     ) -> Dict[str, Any]:
-        """ตรวจสอบเงื่อนไข ENTRY (เหมือน backtest.py ทุกประการ)
+        """ตรวจสอบเงื่อนไข ENTRY (ตรงกับ backtest.py และ rule_engine.py)
 
-        มี 2 เงื่อนไข Entry (Priority):
-        1. PRIORITY 1: Divergence Entry (special_signal == "BUY")
-        2. PRIORITY 2: Pattern Entry (blue → green + bull + not V-shape)
+        Entry Requirements (ต้องผ่านทั้งหมด):
+        1. ✅ LTF: BLUE→GREEN transition (prev2=blue, prev=green)
+        2. ✅ LTF: Bull trend (EMA Fast > EMA Slow)
+        3. ✅ HTF: Bull trend (EMA Fast > EMA Slow)
+        4. ✅ Not V-shape pattern
+        5. ✅ Entry price > Cutloss price
 
-        ไม่ใช้ CDC Rules 4 ข้อเป็นเงื่อนไข Entry!
-        Rules ใช้เพื่อบันทึกและคำนวณ Trailing Stop เท่านั้น
+        ❌ Divergence ไม่ใช้สำหรับ Entry อีกต่อไป (ใช้เฉพาะ Exit)
         """
 
         # ตรวจสอบว่ามีข้อมูลเพียงพอ
-        if len(candles_ltf) < 3 or len(ltf_rows) < 3:
+        if len(candles_ltf) < 3 or len(candles_htf) < 2:
             return {
                 "status": "no_entry_signal",
                 "action": "wait",
-                "reason": "Insufficient candles (need at least 3)",
+                "reason": "Insufficient candles (need at least 3 LTF and 2 HTF)",
             }
 
         current_candle = candles_ltf[-1]
-        current_row = ltf_rows[-1]
-        current_state = strong_states[-1] if strong_states else None
 
-        # ประเมิน Rules เพื่อบันทึก (ไม่ได้ใช้เป็นเงื่อนไข Entry)
+        # ประเมิน Rules โดยใช้ evaluate_all_rules (ตรงกับ backtest)
         rules_result = evaluate_all_rules(
             candles_ltf=candles_ltf,
             candles_htf=candles_htf,
@@ -513,141 +589,70 @@ class RealtimeTradingEngine:
             enable_leading_signal=self.config.enable_leading_signal,
         )
 
-        # สร้าง rules_detail จาก rules_result ถ้ามี
-        rules_detail_dict = None
-        if hasattr(rules_result, 'details') and rules_result.details:
-            rules_detail_dict = rules_result.details
-        elif hasattr(rules_result, 'summary') and isinstance(rules_result.summary, dict):
-            # เตรียมข้อมูล CDC colors จาก candles_ltf
-            prev2_color = candles_ltf[-3].cdc_color.value if len(candles_ltf) >= 3 else "unknown"
-            prev1_color = candles_ltf[-2].cdc_color.value if len(candles_ltf) >= 2 else "unknown"
-            curr_color = candles_ltf[-1].cdc_color.value if len(candles_ltf) >= 1 else "unknown"
+        # สร้าง rules_detail สำหรับ UI
+        rules_detail_dict = self._build_rules_detail(rules_result, candles_ltf, candles_htf)
 
-            # เตรียมข้อมูล Pattern (W-shape) จาก rules_result.rule_4_pattern
-            pattern_result = rules_result.rule_4_pattern
-            pattern_meta = pattern_result.metadata if pattern_result else {}
-            pattern_type = pattern_meta.get("pattern")
-            pattern_details = pattern_meta.get("details", {})
-
-            is_w_shape = pattern_type == "W_SHAPE" if pattern_type else False
-            is_v_shape = pattern_type == "V_SHAPE" if pattern_type else False
-            w_left = pattern_details.get("low1")
-            w_mid = pattern_details.get("mid_high")
-            w_right = pattern_details.get("low2")
-
-            # สร้าง rules_detail พร้อม metadata
-            summary = rules_result.summary
-            rules_detail_dict = {
-                "rule_1_cdc_green": {
-                    "passed": summary.get("rule_1_cdc_green", False),
-                    "reason": f"CDC colors: {prev2_color} → {prev1_color} → {curr_color}",
-                    "metadata": {
-                        "prev2": prev2_color,
-                        "prev1": prev1_color,
-                        "current": curr_color
-                    }
-                },
-                "rule_2_pattern": {
-                    "passed": summary.get("rule_2_pattern", False),
-                    "reason": f"W-shape: {is_w_shape}, V-shape: {is_v_shape}",
-                    "metadata": {
-                        "is_w_shape": is_w_shape,
-                        "is_v_shape": is_v_shape,
-                        "w_left": round(w_left, 2) if w_left else None,
-                        "w_mid": round(w_mid, 2) if w_mid else None,
-                        "w_right": round(w_right, 2) if w_right else None
-                    }
-                }
-            }
-
-        # PRIORITY 1: Divergence Entry (backtest.py line 407-425)
-        if current_state and current_state.get("special_signal") == "BUY":
-            entry_price = current_candle.close
-            position_cutloss = current_state.get("cutloss")
-
-            # Validate cutloss
-            if position_cutloss is None or entry_price <= position_cutloss:
-                return {
-                    "status": "no_entry_signal",
-                    "action": "wait",
-                    "reason": f"Divergence entry invalid: cutloss={position_cutloss}, entry={entry_price}",
-                    "rules": rules_result.summary,
-                    "rules_detail": rules_detail_dict,
-                }
-
-            # คำนวณ Position Size
-            capital = 10000
-            quantity = capital / entry_price
-
-            # ส่ง Order ไป Binance
-            order_result = await self._execute_entry_order(
-                entry_price=entry_price,
-                quantity=quantity,
-                structural_sl=position_cutloss,
-                activation_price=entry_price * 1.075,  # Placeholder
-                rules=rules_result,
-            )
-
-            return {
-                "status": "entry_signal_detected",
-                "action": "buy",
-                "pair": self.pair,
-                "entry_price": entry_price,
-                "quantity": quantity,
-                "sl_price": position_cutloss,
-                "entry_type": "DIVERGENCE",
-                "special_signal": "BUY",
-                "rules": rules_result.summary,
-                "order": order_result,
-            }
-
-        # PRIORITY 2: Pattern Entry (backtest.py line 493-500)
-        prev2_candle = candles_ltf[-3]
-        prev_candle = candles_ltf[-2]
-
-        prev2_zone = prev2_candle.cdc_color
-        prev_zone = prev_candle.cdc_color
-
-        # Check Bull Trend (EMA Fast > EMA Slow)
-        ema_fast = current_row.get("ema_fast", 0)
-        ema_slow = current_row.get("ema_slow", 0)
-        is_bull = ema_fast > ema_slow
-
-        # Check V-shape
-        is_v_shape = current_row.get("is_v_shape", False)
-
-        # Entry Condition: blue → green + bull + not V-shape
-        if not (
-            prev2_zone == CDCColor.BLUE
-            and prev_zone == CDCColor.GREEN
-            and is_bull
-            and not is_v_shape
-        ):
+        # ตรวจสอบว่า Rules ผ่านหรือไม่ (เหมือน backtest.py line 121)
+        if not rules_result.all_passed:
             return {
                 "status": "no_entry_signal",
                 "action": "wait",
-                "reason": f"Entry pattern not met: prev2={prev2_zone.value}, prev={prev_zone.value}, bull={is_bull}, v_shape={is_v_shape}",
+                "reason": f"Entry rules not passed: {rules_result.rule_1_cdc_green.reason}",
                 "rules": rules_result.summary,
                 "rules_detail": rules_detail_dict,
             }
 
-        # ✅ Pattern Entry Matched!
+        # ✅ Entry Conditions Matched!
         entry_price = current_candle.close
 
-        # คำนวณ Position Size
-        capital = 10000
-        quantity = capital / entry_price
+        # คำนวณ Position Size จาก Balance จริง
+        try:
+            binance_client = _make_binance_client()
+            balance = binance_client.fetch_balance()
 
-        # คำนวณ Stop Loss (เหมือน backtest.py _calc_cutloss)
+            # ดึง USDT balance
+            usdt_free = balance.get("USDT", {}).get("free", 0.0)
+
+            if usdt_free <= 0:
+                return {
+                    "status": "no_entry_signal",
+                    "action": "wait",
+                    "reason": f"Insufficient USDT balance: {usdt_free:.2f}",
+                    "rules": rules_result.summary,
+                    "rules_detail": rules_detail_dict,
+                }
+
+            # ใช้เงินทั้งหมด (หรือ % ที่กำหนดใน config)
+            # สามารถปรับเป็น: capital = usdt_free * self.config.position_size_pct
+            capital = usdt_free
+            quantity = capital / entry_price
+
+        except Exception as exc:
+            # Fallback: ถ้าดึง balance ไม่ได้ ให้ใช้ค่า default
+            print(f"[WARNING] Cannot fetch balance: {exc}. Using default capital.")
+            capital = 10000
+            quantity = capital / entry_price
+
+        # คำนวณ Stop Loss
         candles_ltf_closed = candles_ltf[:-1]
         structural_sl = self._calculate_structural_sl(candles_ltf_closed)
+
+        # Validate: Entry price > Cutloss (เหมือน backtest)
+        if entry_price <= structural_sl:
+            return {
+                "status": "no_entry_signal",
+                "action": "wait",
+                "reason": f"Entry price ({entry_price:.2f}) <= Cutloss ({structural_sl:.2f})",
+                "rules": rules_result.summary,
+                "rules_detail": rules_detail_dict,
+            }
 
         # ส่ง Order ไป Binance
         order_result = await self._execute_entry_order(
             entry_price=entry_price,
             quantity=quantity,
             structural_sl=structural_sl,
-            activation_price=entry_price * 1.075,  # Placeholder
+            activation_price=entry_price * 1.075,
             rules=rules_result,
         )
 
@@ -659,10 +664,9 @@ class RealtimeTradingEngine:
             "quantity": quantity,
             "sl_price": structural_sl,
             "entry_type": "PATTERN",
-            "pattern": f"BLUE→GREEN (prev2={prev2_zone.value}, prev={prev_zone.value})",
-            "is_bull": is_bull,
-            "is_v_shape": is_v_shape,
+            "pattern": "BLUE→GREEN + Bull Trend (LTF+HTF)",
             "rules": rules_result.summary,
+            "rules_detail": rules_detail_dict,
             "order": order_result,
         }
 
@@ -677,6 +681,7 @@ class RealtimeTradingEngine:
         """ตรวจสอบเงื่อนไข EXIT (เหมือน backtest.py ทุกประการ)
 
         Exit Conditions (Priority Order):
+        0. Structural Stop Loss (Cutloss) Hit
         1. EMA Crossover (Bearish Trend Reversal)
         2. Trailing Stop Hit
         3. Orange → Red Pattern
@@ -705,6 +710,32 @@ class RealtimeTradingEngine:
         # Get position metadata (stored when entry)
         entry_price = self.position.entry_price  # Changed from avg_cost
         entry_trend_was_bullish = getattr(self.position, 'entry_trend_bullish', None)
+        structural_sl = self.position.sl_price  # Initial/Structural Stop Loss
+
+        # ===================================================
+        # PRIORITY 0: Structural Stop Loss (Cutloss) Hit
+        # ===================================================
+        # This is the MOST important check - must happen BEFORE all other exit conditions
+        # Matches backtest.py line 577-624
+        if structural_sl is not None and current_low <= structural_sl:
+            # 🚪 EXIT! Hit Structural Stop Loss
+            exit_result = await self._execute_exit_order(
+                reason=ExitReason.STRUCTURAL_SL,
+                exit_price=structural_sl,  # Exit at SL price, not Low
+                details=f"Structural Stop Loss Hit: Low={current_low:.2f} <= SL={structural_sl:.2f}"
+            )
+            print(f"[STRUCTURAL SL] Hit at {current_candle.timestamp}: Low={current_low:.2f} <= Cutloss={structural_sl:.2f}")
+
+            return {
+                "status": "exit_signal_detected",
+                "action": "sell",
+                "reason": "STRUCTURAL_SL",
+                "exit_price": structural_sl,
+                "pnl_pct": exit_result.get("pnl_pct", 0),
+                "sl_price": structural_sl,
+                "current_low": current_low,
+                "order": exit_result,
+            }
 
         # PRIORITY 1: EMA Crossover (Bearish Trend Reversal)
         # backtest.py line 599-670
@@ -831,7 +862,14 @@ class RealtimeTradingEngine:
             activation_threshold = activation_price * 1.05
             trailing_stop_info = f"Activated={trailing_stop_activated}, SL={trailing_stop_price:.2f}, Threshold={activation_threshold:.2f}"
 
+        # Distance to Structural SL
+        structural_sl_info = "N/A"
+        if structural_sl:
+            distance_pct = ((current_price - structural_sl) / structural_sl) * 100
+            structural_sl_info = f"SL={structural_sl:.2f}, Distance={distance_pct:+.2f}%, Safe={'✅' if current_low > structural_sl else '❌'}"
+
         exit_checks = {
+            "structural_sl": structural_sl_info,
             "ema_crossover": f"Bull={is_bullish} (Fast={ema_fast:.2f}, Slow={ema_slow:.2f})",
             "trailing_stop": trailing_stop_info,
             "orange_red": f"prev2={prev2_zone.value}, prev={prev_zone.value}",
@@ -847,33 +885,51 @@ class RealtimeTradingEngine:
         }
 
     def _calculate_structural_sl(self, candles: List[Candle]) -> float:
-        """คำนวณ Structural Stop Loss จาก Swing Low ล่าสุด"""
-        # หา Swing Low ล่าสุด (ต่ำกว่าแท่งข้างหน้า/หลัง 2 แท่ง)
+        """คำนวณ Structural Stop Loss จาก Swing Low ที่ใกล้ที่สุดกับจุด Entry
+
+        Swing Low = แท่งที่ Low ต่ำกว่าแท่งข้างหน้าและข้างหลังอย่างน้อย 2 แท่ง
+        ใช้ Swing Low แรกที่เจอ (ใกล้ที่สุด) ไม่ใช่ต่ำสุด
+        """
         if len(candles) < 5:
             return candles[-1].low * 0.95  # Fallback 5%
 
-        # Scan ย้อนหลัง 20 แท่ง
-        lookback = min(20, len(candles) - 2)
-        swing_lows = []
+        lookback = 30  # เพิ่มเป็น 30 แท่งเหมือน backtest
+        swing_window = 2  # ต้องต่ำกว่าแท่งข้างๆ อย่างน้อย 2 แท่ง
 
-        for i in range(len(candles) - 2, max(0, len(candles) - lookback - 1), -1):
-            if i < 2 or i >= len(candles) - 2:
+        # หา Swing Low ย้อนหลังจากแท่งล่าสุด
+        for i in range(len(candles) - 1, max(swing_window, len(candles) - lookback - 1), -1):
+            if i < swing_window or i >= len(candles) - swing_window:
                 continue
 
             current_low = candles[i].low
-            is_swing_low = all(
-                current_low < candles[i - j].low for j in range(1, 3)
-            ) and all(
-                current_low < candles[i + j].low for j in range(1, 3)
-            )
 
+            # เช็คว่าเป็น Swing Low หรือไม่
+            is_swing_low = True
+
+            # เช็คแท่งข้างหลัง (ก่อนหน้า)
+            for k in range(1, swing_window + 1):
+                if i - k >= 0 and candles[i - k].low <= current_low:
+                    is_swing_low = False
+                    break
+
+            # เช็คแท่งข้างหน้า (หลัง)
             if is_swing_low:
-                swing_lows.append(current_low)
+                for k in range(1, swing_window + 1):
+                    if i + k < len(candles) and candles[i + k].low <= current_low:
+                        is_swing_low = False
+                        break
 
-        if swing_lows:
-            return min(swing_lows)  # ใช้ Swing Low ต่ำสุด
-        else:
-            return candles[-1].low * 0.95  # Fallback 5%
+            # ถ้าเป็น Swing Low → ใช้เป็น Cutloss (Swing Low ที่ใกล้ที่สุด)
+            if is_swing_low:
+                return current_low
+
+        # Fallback: ถ้าไม่เจอ Swing Low ให้ใช้ Low ต่ำสุดใน 30 แท่ง
+        lows = [c.low for c in candles[max(0, len(candles) - lookback):]]
+        if lows:
+            return min(lows)
+
+        # Fallback สุดท้าย
+        return candles[-1].low * 0.95
 
     async def _execute_entry_order(
         self,
@@ -937,6 +993,28 @@ class RealtimeTradingEngine:
                     avg_price = cumm_quote / filled_qty
             except Exception:
                 pass
+
+            # 5.1 ✅ Verify Order Status (รอ 2 วินาทีแล้วเช็คอีกครั้ง)
+            await asyncio.sleep(2)
+
+            try:
+                verified_order = binance_client.fetch_order(binance_order_id, symbol)
+                verified_status = verified_order.get("status", "UNKNOWN")
+                verified_filled_qty = float(verified_order.get("filled", filled_qty))
+
+                print(f"[ORDER VERIFY] Order {binance_order_id}: {verified_status}, Filled: {verified_filled_qty}")
+
+                # อัพเดทข้อมูลจาก verified order
+                binance_status = verified_status
+                filled_qty = verified_filled_qty
+
+                # คำนวณ avg_price ใหม่จาก verified order
+                if "cost" in verified_order and verified_filled_qty > 0:
+                    avg_price = float(verified_order["cost"]) / verified_filled_qty
+
+            except Exception as verify_exc:
+                print(f"[ORDER VERIFY] Warning: Cannot verify order {binance_order_id}: {verify_exc}")
+                # ใช้ข้อมูลจาก response เดิม
 
             # 6. บันทึก Order ลง D1 Worker
             # ใช้สถานะจาก Binance: FILLED/PARTIALLY_FILLED/PENDING
@@ -1090,6 +1168,28 @@ class RealtimeTradingEngine:
                     avg_price = cumm_quote / filled_qty
             except Exception:
                 pass
+
+            # 5.1 ✅ Verify Order Status (รอ 2 วินาทีแล้วเช็คอีกครั้ง)
+            await asyncio.sleep(2)
+
+            try:
+                verified_order = binance_client.fetch_order(binance_order_id, symbol)
+                verified_status = verified_order.get("status", "UNKNOWN")
+                verified_filled_qty = float(verified_order.get("filled", filled_qty))
+
+                print(f"[EXIT ORDER VERIFY] Order {binance_order_id}: {verified_status}, Filled: {verified_filled_qty}")
+
+                # อัพเดทข้อมูลจาก verified order
+                binance_status = verified_status
+                filled_qty = verified_filled_qty
+
+                # คำนวณ avg_price ใหม่จาก verified order
+                if "cost" in verified_order and verified_filled_qty > 0:
+                    avg_price = float(verified_order["cost"]) / verified_filled_qty
+
+            except Exception as verify_exc:
+                print(f"[EXIT ORDER VERIFY] Warning: Cannot verify order {binance_order_id}: {verify_exc}")
+                # ใช้ข้อมูลจาก response เดิม
 
             # 6. คำนวณ PnL
             pnl_pct = ((avg_price - self.position.entry_price) / self.position.entry_price) * 100 if self.position.entry_price else 0

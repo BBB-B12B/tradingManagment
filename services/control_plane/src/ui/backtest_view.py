@@ -95,6 +95,14 @@ def render_backtest_view(pairs: List[str]) -> str:
         ["rule_4_pattern", "Pattern (W/ไม่เป็น V)"],
       ];
 
+      function entryReasonText(reason) {{
+        switch (reason) {{
+          case "PATTERN_BLUE_TO_GREEN": return "🔵➡️🟢 BLUE→GREEN";
+          case "DIVERGENCE_BULLISH": return "📊 Bullish Divergence";
+          default: return reason || "BLUE→GREEN";
+        }}
+      }}
+
       function exitReasonText(reason) {{
         switch (reason) {{
           case "ACTION_ZONE_RED_LTF": return "เปลี่ยนเป็น Red (Action Zone) ที่ LTF";
@@ -153,11 +161,12 @@ def render_backtest_view(pairs: List[str]) -> str:
               <td>${{(t.pnl_amount ?? 0).toFixed(2)}}</td>
               <td>${{t.duration_days != null ? t.duration_days.toFixed(2) : '-'}}</td>
               <td><span class="pill ${{t.pnl_pct > 0 ? 'win' : 'loss'}}">${{t.pnl_pct.toFixed(2)}}%</span></td>
+              <td class="note">${{entryReasonText(t.entry_reason)}}</td>
               <td class="note">${{exitReasonText(t.exit_reason)}}</td>
               <td>${{renderRulesCell(t)}}</td>
             </tr>
           `).join("")
-          : '<tr><td colspan="12" style="text-align:center; padding:0.9rem;">ยังไม่มีเทรด</td></tr>';
+          : '<tr><td colspan="13" style="text-align:center; padding:0.9rem;">ยังไม่มีเทรด</td></tr>';
 
         resultsEl.innerHTML = `
           <h2>📈 ผลลัพธ์</h2>
@@ -174,7 +183,7 @@ def render_backtest_view(pairs: List[str]) -> str:
           <div class="table-wrapper">
             <table>
               <thead>
-                <tr><th>เข้า</th><th>ออก</th><th>ราคาเข้า</th><th>ราคาออก</th><th>Cutloss</th><th>เงินเข้า</th><th>จำนวนหน่วย (Sat)</th><th>กำไร/ขาดทุน</th><th>ระยะเวลา (วัน)</th><th>PnL %</th><th>เหตุออก</th><th>เกณฑ์ 4 ข้อ</th></tr>
+                <tr><th>เข้า</th><th>ออก</th><th>ราคาเข้า</th><th>ราคาออก</th><th>Cutloss</th><th>เงินเข้า</th><th>จำนวนหน่วย (Sat)</th><th>กำไร/ขาดทุน</th><th>ระยะเวลา (วัน)</th><th>PnL %</th><th>เหตุเข้า</th><th>เหตุออก</th><th>เกณฑ์ 4 ข้อ</th></tr>
               </thead>
               <tbody>${{rows}}</tbody>
             </table>

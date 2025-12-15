@@ -402,63 +402,14 @@ def _run_backtest(
         divergence_entry_taken = False
 
         # PRIORITY 1: Strong_Buy special signal entry (RSI divergence + blue zone)
-        # This takes precedence over pattern-based entry (blue→green)
-        if (
-            not in_position
-            and state
-            and state.get("special_signal") == "BUY"
-        ):
-            entry_price = ltf_row["close"]
-            position_cutloss = state.get("cutloss")
-            if position_cutloss is None or entry_price <= position_cutloss:
-                continue
-
-            # position sizing: (initial_capital × budget_pct) + accumulated_profit
-            # This compounds 100% of profit into next trade, not entire equity
-            base_investment = initial_capital * budget_pct
-            position_capital = base_investment + accumulated_profit
-            units = position_capital / entry_price
-            if position_capital <= 0 or units <= 0:
-                continue
-
-            in_position = True
-            divergence_entry_taken = True  # Mark that divergence entry was used
-            entry_time = candle.timestamp
-            entry_rules = dict(rules_result.summary)
-            position_units = units
-            # For divergence entries, use actual EMA values at entry time
-            entry_ema_fast = ltf_row.get("ema_fast", 0.0)
-            entry_ema_slow = ltf_row.get("ema_slow", 0.0)
-            entry_trend_was_bullish = entry_ema_fast > entry_ema_slow  # Save actual trend at entry
-            print(f"[BACKTEST DIVERGENCE] Entry at {candle.timestamp}: EMA Fast={entry_ema_fast:.2f}, Slow={entry_ema_slow:.2f}, Trend={'BULL' if entry_trend_was_bullish else 'BEAR'}")
-
-            # Initialize Trailing Stop (only if enabled)
-            if use_trailing_stop:
-                trailing_stop_price = position_cutloss
-                trailing_stop_activated = False
-                next_sl = position_cutloss  # Initialize next_sl for lagging indicator pattern
-
-                # Try to find wave structure for this entry (use open_time, not index)
-                entry_open_time = int(ltf_row["open_time"])
-                wave = _trace_wave_for_entry(decorated_ltf, entry_open_time)
-                if wave:
-                    # Calculate Fibonacci 100% Extension = Swing Low 2 + (Swing High - Swing Low 1)
-                    swing_low_1 = wave.get("swing_low_1", {})
-                    swing_high = wave.get("swing_high", {})
-                    swing_low_2 = wave.get("swing_low_2", {})
-
-                    wave1_range = swing_high.get("price", 0) - swing_low_1.get("price", 0)
-                    projection_base = swing_low_2.get("price", 0)
-                    trailing_stop_activation_price = projection_base + wave1_range  # 100% Extension
-
-                    print(f"[BACKTEST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (Fib 100% Extension)")
-                else:
-                    # Fallback: Use 7.5% profit as activation
-                    trailing_stop_activation_price = entry_price * 1.075
-                    print(f"[BACKTEST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (7.5% fallback - no wave)")
-
-                prev_high = (candle.open + candle.close) / 2  # Initialize with average price
-            continue
+        # ❌ DISABLED: Divergence entry disabled per user request (only use for exit signals)
+        # Divergence is still calculated and used for exit detection via check_divergence_exit()
+        # if (
+        #     not in_position
+        #     and state
+        #     and state.get("special_signal") == "BUY"
+        # ):
+        #     ... divergence entry code disabled ...
 
         # Historical path mirrors chart fallback when lower-TF data is missing
         historical_signal = (
@@ -470,23 +421,47 @@ def _run_backtest(
         )
 
         def _calc_cutloss(idx_ltf: int) -> float:
-            """ตาม logic ในกราฟ: หาจุดต่ำสุดจาก red ย้อนหลังแบบติดกัน (ดู 30 แท่ง), fallback min close 2 แท่งก่อนหน้า"""
+            """หา Swing Low ที่ใกล้ที่สุดกับจุด Entry (Local Bottom ที่ Low ต่ำกว่าแท่งข้างๆ)
+
+            Swing Low = แท่งที่ Low ต่ำกว่าแท่งข้างหน้าและข้างหลังอย่างน้อย 2 แท่ง
+            """
             lookback = 30
-            cutloss_price = ltf_row["close"] * 0.95
+            swing_window = 2  # ต้องต่ำกว่าแท่งข้างๆ อย่างน้อย 2 แท่ง
 
-            reds: List[float] = []
-            for j in range(idx_ltf - 1, max(-1, idx_ltf - lookback) , -1):
-                zone = decorated_ltf[j]["action_zone"]
-                if zone == "red":
-                    reds.append(decorated_ltf[j]["close"])
-                elif reds:
-                    break
+            # หา Swing Low ย้อนหลัง
+            for j in range(idx_ltf - 1, max(swing_window, idx_ltf - lookback), -1):
+                if j < swing_window or j >= len(decorated_ltf) - swing_window:
+                    continue
 
-            if reds:
-                cutloss_price = min(reds)
-            elif idx_ltf >= 2:
-                cutloss_price = min(decorated_ltf[idx_ltf - 2]["close"], decorated_ltf[idx_ltf - 1]["close"])
-            return cutloss_price
+                current_low = decorated_ltf[j]["low"]
+
+                # เช็คว่าเป็น Swing Low หรือไม่ (ต่ำกว่าแท่งข้างหน้าและข้างหลัง)
+                is_swing_low = True
+
+                # เช็คแท่งข้างหลัง (ก่อนหน้า)
+                for k in range(1, swing_window + 1):
+                    if j - k >= 0 and decorated_ltf[j - k]["low"] <= current_low:
+                        is_swing_low = False
+                        break
+
+                # เช็คแท่งข้างหน้า (หลัง)
+                if is_swing_low:
+                    for k in range(1, swing_window + 1):
+                        if j + k < len(decorated_ltf) and decorated_ltf[j + k]["low"] <= current_low:
+                            is_swing_low = False
+                            break
+
+                # ถ้าเป็น Swing Low → ใช้เป็น Cutloss
+                if is_swing_low:
+                    return current_low
+
+            # Fallback: ถ้าไม่เจอ Swing Low ให้ใช้ Low ต่ำสุดใน 30 แท่ง
+            lows = [decorated_ltf[j]["low"] for j in range(max(0, idx_ltf - lookback), idx_ltf)]
+            if lows:
+                return min(lows)
+
+            # Fallback สุดท้าย: ใช้ Low ของแท่งปัจจุบัน - 5%
+            return ltf_row.get("low", ltf_row["close"]) * 0.95
 
         # Entry check: blue → green + bull + not V-shape
         # PRIORITY 2: Only enter via pattern if no divergence signal exists
@@ -498,6 +473,11 @@ def _run_backtest(
             and is_bull
             and not is_v_shape
         ):
+            # Check HTF bull trend requirement for BOTH historical and validated paths
+            htf_row = _find_candle_at_or_before(decorated_htf, int(ltf_row["open_time"]))
+            if not htf_row or not _is_bullish(htf_row):
+                continue
+
             if historical_signal:
                 entry_price = ltf_row["close"]
                 position_cutloss = _calc_cutloss(idx)
@@ -516,6 +496,7 @@ def _run_backtest(
                 entry_rules = dict(rules_result.summary)
                 position_units = units
                 entry_trend_was_bullish = is_bull  # Save trend at entry
+                entry_reason = "PATTERN_BLUE_TO_GREEN"  # Historical path entry
 
                 # Initialize Trailing Stop (only if enabled)
                 if use_trailing_stop:
@@ -545,10 +526,7 @@ def _run_backtest(
                     prev_high = (candle.open + candle.close) / 2  # Initialize with average price
                 continue
 
-            htf_row = _find_candle_at_or_before(decorated_htf, int(ltf_row["open_time"]))
-            if not htf_row or not _is_bullish(htf_row):
-                continue
-
+            # HTF bull check already done above (line 526-528)
             entry_candle = _find_buy_entry_on_lower_tf(int(ltf_row["open_time"]), lower_tf_candles)
             if entry_candle:
                 entry_price = entry_candle["close"]
@@ -568,6 +546,7 @@ def _run_backtest(
                 in_position = True
                 position_units = units
                 entry_trend_was_bullish = is_bull  # Save trend at entry
+                entry_reason = "PATTERN_BLUE_TO_GREEN"  # Validated path entry
 
                 # Initialize Trailing Stop
                 trailing_stop_price = position_cutloss
@@ -594,6 +573,60 @@ def _run_backtest(
                     print(f"[BACKTEST PATH2-HIST] Entry at {candle.timestamp}: Price={entry_price:.2f}, InitialSL={position_cutloss:.2f}, Activation={trailing_stop_activation_price:.2f} (7.5% fallback - no wave)")
 
                 prev_high = (candle.open + candle.close) / 2  # Initialize with average price
+
+        # PRIORITY 0: Check Structural Stop Loss (Cutloss) - MUST check regardless of trailing stop setting
+        if in_position and position_cutloss is not None:
+            current_low = candle.low
+            if current_low <= position_cutloss:
+                exit_price = position_cutloss
+                exit_time = candle.timestamp
+                exit_reason = "STRUCTURAL_SL"
+                print(f"[BACKTEST] Structural Stop Loss HIT at {candle.timestamp}: Low={current_low:.2f} <= Cutloss={position_cutloss:.2f}")
+
+                pnl_pct = ((exit_price - entry_price) / entry_price) * 100
+                pnl_amount = position_capital * (pnl_pct / 100)
+                duration_days = (exit_time - entry_time).total_seconds() / 86400 if entry_time else 0.0
+                equity_value = equity * initial_capital + pnl_amount
+                equity = equity_value / initial_capital
+
+                # Update accumulated profit for compounding
+                accumulated_profit += pnl_amount
+
+                trades.append(
+                    {
+                        "entry_time": entry_time.isoformat() if entry_time else "",
+                        "entry_price": round(entry_price, 4),
+                        "exit_time": exit_time.isoformat(),
+                        "exit_price": round(exit_price, 4),
+                        "pnl_pct": round(pnl_pct, 3),
+                        "invested_amount": round(position_capital, 2),
+                        "position_units": round(position_units, 6),
+                        "pnl_amount": round(pnl_amount, 2),
+                        "cutloss_price": round(position_cutloss, 4) if position_cutloss is not None else None,
+                        "duration_days": round(duration_days, 2),
+                        "ltf_color_at_entry": ltf_slice[-1].cdc_color.value if ltf_slice else "unknown",
+                        "ltf_color_at_exit": ltf_row.get("cdc_color", "none"),
+                        "rules": entry_rules or {},
+                        "entry_reason": entry_reason if 'entry_reason' in locals() else "PATTERN_BLUE_TO_GREEN",
+                        "exit_reason": exit_reason,
+                    }
+                )
+
+                in_position = False
+                entry_price = 0.0
+                entry_time = None
+                entry_rules = None
+                exit_reason = None
+                position_capital = 0.0
+                position_cutloss = None
+                position_units = 0.0
+                trailing_stop_price = None
+                trailing_stop_activated = False
+                trailing_stop_activation_price = None
+                prev_high = 0.0
+                next_sl = None  # Reset lagging indicator
+                entry_trend_was_bullish = None  # Reset entry trend
+                continue
 
         # Update Trailing Stop while in position (only if enabled)
         if in_position and use_trailing_stop and trailing_stop_price is not None:
@@ -649,6 +682,7 @@ def _run_backtest(
                         "ltf_color_at_entry": ltf_slice[-1].cdc_color.value if ltf_slice else "unknown",
                         "ltf_color_at_exit": ltf_row.get("cdc_color", "none"),
                         "rules": entry_rules or {},
+                        "entry_reason": entry_reason if 'entry_reason' in locals() else "PATTERN_BLUE_TO_GREEN",
                         "exit_reason": exit_reason,
                     }
                 )
@@ -703,6 +737,7 @@ def _run_backtest(
                         "ltf_color_at_entry": ltf_slice[-1].cdc_color.value if ltf_slice else "unknown",
                         "ltf_color_at_exit": ltf_row.get("cdc_color", "none"),
                         "rules": entry_rules or {},
+                        "entry_reason": entry_reason if 'entry_reason' in locals() else "PATTERN_BLUE_TO_GREEN",
                         "exit_reason": exit_reason,
                     }
                 )
@@ -806,6 +841,7 @@ def _run_backtest(
                     "ltf_color_at_entry": ltf_slice[-1].cdc_color.value if ltf_slice else "unknown",
                     "ltf_color_at_exit": ltf_row.get("cdc_color", "none"),
                     "rules": entry_rules or {},
+                    "entry_reason": entry_reason if 'entry_reason' in locals() else "PATTERN_BLUE_TO_GREEN",
                     "exit_reason": exit_reason,
                 }
             )
@@ -856,6 +892,7 @@ def _run_backtest(
                     "ltf_color_at_entry": ltf_slice[-1].cdc_color.value if ltf_slice else "unknown",
                     "ltf_color_at_exit": ltf_row.get("cdc_color", "none"),
                     "rules": entry_rules or {},
+                    "entry_reason": entry_reason if 'entry_reason' in locals() else "PATTERN_BLUE_TO_GREEN",
                     "exit_reason": exit_reason,
                 }
             )
@@ -914,6 +951,7 @@ def _run_backtest(
                 "ltf_color_at_entry": decorated_ltf[-1].get("cdc_color", "none"),
                 "ltf_color_at_exit": decorated_ltf[-1].get("cdc_color", "none"),
                 "rules": entry_rules or {},
+                "entry_reason": entry_reason if 'entry_reason' in locals() else "PATTERN_BLUE_TO_GREEN",
                 "exit_reason": exit_reason,
                 "open_ended": True,
             }

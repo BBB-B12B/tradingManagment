@@ -739,36 +739,54 @@ def build_chart_section() -> str:
             // 1. ต้องเข้า Blue Zone (uptrend confirmed)
             // 2. RSI ต้องกลับมาเหนือ 40 (แรงซื้อกลับมา)
             if (zone.zone === 'blue' && rsi > 40) {
-              // ✅ คำนวณ Cutloss แบบปรับปรุง - ใช้ swing low ย้อนหลัง 30 แท่ง
-              let cutloss = candle.low; // เริ่มจากราคาต่ำสุดปัจจุบัน
+              // ✅ คำนวณ Cutloss ด้วย Swing Low (Local Bottom ที่ใกล้ที่สุด)
+              let cutloss = candle.low * 0.95; // Fallback
               const lookback = 30;
+              const swingWindow = 2; // ต้องต่ำกว่าแท่งข้างๆ อย่างน้อย 2 แท่ง
+              let foundSwingLow = false;
 
-              // หา swing low (จุดต่ำสุด) ย้อนหลัง
-              for (let j = i - 1; j >= Math.max(0, i - lookback); j--) {
+              // หา Swing Low ย้อนหลัง (แท่งที่ Low ต่ำกว่าแท่งข้างๆ)
+              for (let j = i - 1; j >= Math.max(swingWindow, i - lookback); j--) {
+                if (j < swingWindow || j >= priceData.length - swingWindow) continue;
                 if (!priceData[j]) continue;
-                if (priceData[j].low < cutloss) {
-                  cutloss = priceData[j].low;
+
+                const currentLow = priceData[j].low;
+                let isSwingLow = true;
+
+                // เช็คแท่งข้างหลัง (ก่อนหน้า)
+                for (let k = 1; k <= swingWindow; k++) {
+                  if (j - k >= 0 && priceData[j - k] && priceData[j - k].low <= currentLow) {
+                    isSwingLow = false;
+                    break;
+                  }
                 }
-              }
 
-              // เพิ่ม safety buffer 2%
-              cutloss = cutloss * 0.98;
+                // เช็คแท่งข้างหน้า (หลัง)
+                if (isSwingLow) {
+                  for (let k = 1; k <= swingWindow; k++) {
+                    if (j + k < priceData.length && priceData[j + k] && priceData[j + k].low <= currentLow) {
+                      isSwingLow = false;
+                      break;
+                    }
+                  }
+                }
 
-              // ตรวจสอบว่ามี red zone ย้อนหลังไหม (เพิ่มความปลอดภัย)
-              const reds = [];
-              for (let j = i - 1; j >= Math.max(0, i - lookback); j--) {
-                if (!zoneData[j]) continue;
-                if (zoneData[j].zone === 'red') {
-                  reds.push(priceData[j].low);
-                } else if (reds.length > 0) {
+                // ถ้าเป็น Swing Low → ใช้เป็น Cutloss (ใกล้ที่สุด)
+                if (isSwingLow) {
+                  cutloss = currentLow;
+                  foundSwingLow = true;
                   break;
                 }
               }
 
-              // ถ้าเจอ red zone ให้ใช้จุดต่ำสุดของ red zone (ปลอดภัยกว่า)
-              if (reds.length > 0) {
-                const redLow = Math.min(...reds) * 0.98;
-                cutloss = Math.min(cutloss, redLow);
+              // Fallback: ถ้าไม่เจอ Swing Low ให้ใช้ Low ต่ำสุดใน 30 แท่ง
+              if (!foundSwingLow) {
+                for (let j = i - 1; j >= Math.max(0, i - lookback); j--) {
+                  if (!priceData[j]) continue;
+                  if (priceData[j].low < cutloss) {
+                    cutloss = priceData[j].low;
+                  }
+                }
               }
 
               state.special_signal = 'BUY';
@@ -777,7 +795,7 @@ def build_chart_section() -> str:
               bullishActive = false;
               bullishPreviousZone = null;
               console.log(`🔔 ✅ BUY SIGNAL CONFIRMED at index ${i}`);
-              console.log(`   Cutloss: ${cutloss.toFixed(2)} (Swing low with 2% buffer)`);
+              console.log(`   Cutloss: ${cutloss.toFixed(2)} (Swing Low${foundSwingLow ? ' found' : ' fallback'})`);
               console.log(`   RSI: ${rsi.toFixed(2)} (above 40 ✓)`);
               console.log(`   Zone: Blue (uptrend ✓)`);
             }
@@ -3162,25 +3180,53 @@ def build_chart_section() -> str:
         return { found: false, reason: 'no_1h_exit' };
       }
 
-      // 6. Calculate Cutloss from 1D red candles
+      // 6. Calculate Cutloss using Swing Low (Local Bottom ที่ใกล้ที่สุด)
       function calc1D_Cutloss(candleIndex, candles1d, entryPrice) {
         const lookback = 30;
+        const swingWindow = 2;
         let cutlossPrice = entryPrice * 0.95; // fallback
 
-        let redCandles = [];
-        for (let j = candleIndex - 1; j >= Math.max(0, candleIndex - lookback); j--) {
-          const zone = candles1d[j].action_zone;
-          if (zone === 'red') {
-            redCandles.push(candles1d[j].close);
-          } else if (redCandles.length > 0) {
+        // หา Swing Low ย้อนหลัง
+        for (let j = candleIndex - 1; j >= Math.max(swingWindow, candleIndex - lookback); j--) {
+          if (j < swingWindow || j >= candles1d.length - swingWindow) continue;
+          if (!candles1d[j]) continue;
+
+          const currentLow = candles1d[j].low;
+          let isSwingLow = true;
+
+          // เช็คแท่งข้างหลัง (ก่อนหน้า)
+          for (let k = 1; k <= swingWindow; k++) {
+            if (j - k >= 0 && candles1d[j - k] && candles1d[j - k].low <= currentLow) {
+              isSwingLow = false;
+              break;
+            }
+          }
+
+          // เช็คแท่งข้างหน้า (หลัง)
+          if (isSwingLow) {
+            for (let k = 1; k <= swingWindow; k++) {
+              if (j + k < candles1d.length && candles1d[j + k] && candles1d[j + k].low <= currentLow) {
+                isSwingLow = false;
+                break;
+              }
+            }
+          }
+
+          // ถ้าเป็น Swing Low → ใช้เป็น Cutloss (ใกล้ที่สุด)
+          if (isSwingLow) {
+            cutlossPrice = currentLow;
             break;
           }
         }
 
-        if (redCandles.length > 0) {
-          cutlossPrice = Math.min(...redCandles);
-        } else if (candleIndex >= 2) {
-          cutlossPrice = Math.min(candles1d[candleIndex - 2].close, candles1d[candleIndex - 1].close);
+        // Fallback: ถ้าไม่เจอ Swing Low ให้ใช้ Low ต่ำสุดใน 30 แท่ง
+        if (cutlossPrice === entryPrice * 0.95) {
+          for (let j = candleIndex - 1; j >= Math.max(0, candleIndex - lookback); j--) {
+            if (!candles1d[j]) continue;
+            if (candles1d[j].low < cutlossPrice) {
+              cutlossPrice = candles1d[j].low;
+            }
+          }
         }
 
         return cutlossPrice;
@@ -3890,27 +3936,54 @@ def build_chart_section() -> str:
                     // Calculate buy price
                     const buyPrice = c.close;
 
-                    // Calculate cutloss: Find consecutive red candles closest to entry point (look back 30 candles)
-                    const cutlossWindow = 30;
-                    let cutlossPrice = buyPrice * 0.95; // Default fallback (5% below entry)
+                    // Calculate cutloss using Swing Low (Local Bottom ที่ใกล้ที่สุด)
+                    const lookback = 30;
+                    const swingWindow = 2;
+                    let cutlossPrice = buyPrice * 0.95; // Default fallback
 
-                    // Find the most recent consecutive red zone candles
-                    let redCandles = [];
-                    for (let j = i - 1; j >= Math.max(0, i - cutlossWindow); j--) {
-                      const zone = data.candles[j].action_zone;
-                      if (zone === 'red') {
-                        redCandles.push(data.candles[j].close); // Use close price, not low
-                      } else if (redCandles.length > 0) {
-                        // Found non-red after finding reds, stop here
+                    // หา Swing Low ย้อนหลัง
+                    let foundSwingLow = false;
+                    for (let j = i - 1; j >= Math.max(swingWindow, i - lookback); j--) {
+                      if (j < swingWindow || j >= data.candles.length - swingWindow) continue;
+                      if (!data.candles[j]) continue;
+
+                      const currentLow = data.candles[j].low;
+                      let isSwingLow = true;
+
+                      // เช็คแท่งข้างหลัง (ก่อนหน้า)
+                      for (let k = 1; k <= swingWindow; k++) {
+                        if (j - k >= 0 && data.candles[j - k] && data.candles[j - k].low <= currentLow) {
+                          isSwingLow = false;
+                          break;
+                        }
+                      }
+
+                      // เช็คแท่งข้างหน้า (หลัง)
+                      if (isSwingLow) {
+                        for (let k = 1; k <= swingWindow; k++) {
+                          if (j + k < data.candles.length && data.candles[j + k] && data.candles[j + k].low <= currentLow) {
+                            isSwingLow = false;
+                            break;
+                          }
+                        }
+                      }
+
+                      // ถ้าเป็น Swing Low → ใช้เป็น Cutloss (ใกล้ที่สุด)
+                      if (isSwingLow) {
+                        cutlossPrice = currentLow;
+                        foundSwingLow = true;
                         break;
                       }
                     }
 
-                    if (redCandles.length > 0) {
-                      cutlossPrice = Math.min(...redCandles);
-                    } else {
-                      // Fallback: use min close of last 2 candles
-                      cutlossPrice = Math.min(data.candles[i - 2].close, data.candles[i - 1].close);
+                    // Fallback: ถ้าไม่เจอ Swing Low ให้ใช้ Low ต่ำสุดใน 30 แท่ง
+                    if (!foundSwingLow) {
+                      for (let j = i - 1; j >= Math.max(0, i - lookback); j--) {
+                        if (!data.candles[j]) continue;
+                        if (data.candles[j].low < cutlossPrice) {
+                          cutlossPrice = data.candles[j].low;
+                        }
+                      }
                     }
 
                     // Calculate Take Profit target (2% profit)

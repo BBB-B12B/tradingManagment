@@ -520,7 +520,7 @@ ${{line5}}</pre>
         let detailHTML = `<div><strong>📌 เหตุผล:</strong> ${{reasonThai}}</div>`;
 
         // Special handling for W-shape pattern - show ASCII art graph
-        if (ruleName === "📐 Pattern (W-shape)" && metadata.w_left != null && metadata.w_mid != null && metadata.w_right != null) {{
+        if (ruleName === "ℹ️ 📐 Pattern (Info)" && metadata.w_left != null && metadata.w_mid != null && metadata.w_right != null) {{
           const wLeft = metadata.w_left;
           const wMid = metadata.w_mid;
           const wRight = metadata.w_right;
@@ -707,10 +707,13 @@ ${{line5}}</pre>
           html += `
             <div class="rule-item" onclick="this.classList.toggle('expanded')">
               <div class="rule-header">
-                <span>📊 Exit Checks (4 เงื่อนไข)</span>
+                <span>📊 Exit Checks (5 เงื่อนไข)</span>
                 <span class="toggle-icon">▼</span>
               </div>
               <div class="rule-detail">
+                <div style="margin: 0.3rem 0;">
+                  <strong>0️⃣ Structural Stop Loss:</strong> ${{exitChecks.structural_sl || 'N/A'}}
+                </div>
                 <div style="margin: 0.3rem 0;">
                   <strong>1️⃣ EMA Crossover (Bearish):</strong> ${{exitChecks.ema_crossover || 'N/A'}}
                 </div>
@@ -752,8 +755,8 @@ ${{line5}}</pre>
           if (rulesDetail.rule_1_cdc_green) {{
             html += createExpandableRuleItem("🔵→🟢 CDC Transition", rulesDetail.rule_1_cdc_green, "🔵");
           }}
-          if (rulesDetail.rule_2_pattern) {{
-            html += createExpandableRuleItem("📐 Pattern (W-shape)", rulesDetail.rule_2_pattern, "📐");
+          if (rulesDetail.rule_4_pattern) {{
+            html += createExpandableRuleItem("ℹ️ 📐 Pattern (Info)", rulesDetail.rule_4_pattern, "📐");
           }}
 
           appendRuleLogHTML(html);
