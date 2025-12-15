@@ -216,21 +216,30 @@ class TradingScheduler:
             interval_minutes: ตรวจสอบทุกกี่นาที (default: 1)
         """
         if self.is_running:
-            raise RuntimeError("Scheduler is already running")
+            print("⚠️  Scheduler already running in this instance - stopping first...")
+            await self.stop()
 
         self.pairs = pairs
         self.interval_minutes = float(interval_minutes)
 
+        # ลบ jobs เก่าทั้งหมดก่อนเพิ่มใหม่ (ป้องกันการทำงานซ้ำจาก reload)
+        for job in self.scheduler.get_jobs():
+            self.scheduler.remove_job(job.id)
+            print(f"🗑️  Removed old job: {job.id}")
+
         # เพิ่ม Job เข้า Scheduler
+        job_id = f"trading_check_{interval_minutes}m"
         self.scheduler.add_job(
             self._check_all_pairs,
             trigger=IntervalTrigger(seconds=self.interval_minutes * 60),
-            id=f"trading_check_{interval_minutes}m",
+            id=job_id,
             replace_existing=True,
             max_instances=1,  # ป้องกันการทำงานซ้ำซ้อน
         )
+        print(f"✅ Added new job: {job_id}")
 
-        self.scheduler.start()
+        if not self.scheduler.running:
+            self.scheduler.start()
         self.is_running = True
 
         # บันทึก Scheduler Start Log

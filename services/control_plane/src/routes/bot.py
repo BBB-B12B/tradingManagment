@@ -437,8 +437,13 @@ async def start_scheduler(payload: SchedulerStartRequest) -> Dict[str, Any]:
     """
     global _trading_scheduler
 
+    # หยุด scheduler เก่าก่อน (ถ้ามี) เพื่อป้องกันการทำงานซ้ำ
     if _trading_scheduler and _trading_scheduler.is_running:
-        raise HTTPException(status_code=400, detail="Scheduler is already running. Stop it first.")
+        print("⚠️  Stopping existing scheduler before starting new one...")
+        try:
+            await _trading_scheduler.stop()
+        except Exception as e:
+            print(f"⚠️  Error stopping old scheduler: {e}")
 
     if payload.interval_minutes <= 0:
         raise HTTPException(status_code=400, detail="interval_minutes ต้องมากกว่า 0 (รองรับทศนิยม เช่น 0.5 = 30 วินาที)")
@@ -516,8 +521,20 @@ async def get_scheduler_status() -> Dict[str, Any]:
 
     scheduler_status = _trading_scheduler.get_status()
 
+    # เพิ่มข้อมูล APScheduler jobs เพื่อตรวจสอบว่ามีการทำงานซ้ำ
+    jobs_info = []
+    if _trading_scheduler.scheduler:
+        for job in _trading_scheduler.scheduler.get_jobs():
+            jobs_info.append({
+                "id": job.id,
+                "name": job.name,
+                "next_run": str(job.next_run_time) if job.next_run_time else None,
+            })
+
     return {
         "status": "running" if scheduler_status["is_running"] else "stopped",
+        "active_jobs": jobs_info,
+        "job_count": len(jobs_info),
         **scheduler_status,
     }
 

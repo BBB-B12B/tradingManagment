@@ -45,10 +45,10 @@ def render_bot_runner(pairs: List[str]) -> str:
       .modal-grid input, .modal-grid select { padding: 0.5rem 0.65rem; border: 1px solid #d5dbe3; border-radius: 8px; background: #f8fafc; font-size: 0.95rem; }
       .modal-actions { display: flex; gap: 0.6rem; margin-top: 0.8rem; justify-content: flex-end; }
       .table-card { background: #fff; border-radius: 12px; box-shadow: 0 8px 20px rgba(15,23,42,0.06); padding: 1rem 1.1rem; }
-      .table-wrapper { width: 100%; overflow-x: auto; }
+      .table-wrapper { width: 100%; max-height: 500px; overflow: auto; }
       table { width: 100%; border-collapse: collapse; }
       th, td { padding: 0.55rem 0.4rem; border-bottom: 1px solid #e5e7eb; text-align: left; font-size: 0.92rem; }
-      th { background: #f8fafc; font-weight: 700; color: #0f172a; }
+      th { background: #f8fafc; font-weight: 700; color: #0f172a; position: sticky; top: 0; z-index: 10; }
       .badge { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.15rem 0.55rem; border-radius: 999px; font-size: 0.82rem; font-weight: 700; }
       .badge-open { background: #fff3cd; color: #92400e; }
       .badge-filled { background: #ecfdf3; color: #166534; }
@@ -272,13 +272,32 @@ def render_bot_runner(pairs: List[str]) -> str:
           }}
           lastOrdersKey = key;
           const rows = orders.map(o => {{
+            // แปลง created_at เป็นเวลาไทย
+            let thaiTime = '';
+            if (o.created_at) {{
+              const date = new Date(o.created_at);
+              thaiTime = date.toLocaleString('th-TH', {{
+                timeZone: 'Asia/Bangkok',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                hour12: false
+              }});
+            }}
+            // Format ตัวเลขให้อ่านง่าย
+            const qty = o.requested_qty != null ? parseFloat(o.requested_qty).toFixed(5) : '-';
+            const price = o.avg_price != null ? parseFloat(o.avg_price).toFixed(2) : '-';
+
             return `<tr>
-              <td>${{o.created_at || ''}}</td>
+              <td>${{thaiTime || ''}}</td>
               <td>${{o.pair || '-'}} </td>
               <td>${{o.order_type || '-'}} </td>
               <td>${{o.side || '-'}} </td>
-              <td>${{o.requested_qty || '-'}} </td>
-              <td>${{o.avg_price != null ? o.avg_price : '-'}} </td>
+              <td>${{qty}}</td>
+              <td>${{price}}</td>
               <td>${{badge(o.status)}}</td>
               <td>${{o.order_id || '-'}} </td>
             </tr>`;
@@ -967,17 +986,37 @@ ${{line5}}</pre>
           if (isSchedulerRunning) {{
             const pairs = schedulerData.pairs || [];
             const interval = schedulerData.interval_minutes || 1;
-            const jobs = schedulerData.jobs || [];
-            const activeJobs = jobs.length;
+            const activeJobs = schedulerData.active_jobs || [];
+            const jobCount = schedulerData.job_count || 0;
+
+            // สร้างรายการ jobs
+            let jobsList = '';
+            if (activeJobs.length > 0) {{
+              jobsList = '<div style="margin-top: 0.4rem; padding: 0.4rem; background: rgba(255,255,255,0.6); border-radius: 4px; font-size: 0.8rem;">';
+              activeJobs.forEach(job => {{
+                const nextRun = job.next_run ? new Date(job.next_run).toLocaleTimeString('th-TH') : '-';
+                jobsList += `
+                  <div style="display: flex; justify-content: space-between; padding: 0.2rem 0; border-bottom: 1px solid #e2e8f0;">
+                    <span><strong>Job ID:</strong> ${{job.id}}</span>
+                    <span style="color: #64748b;">Next: ${{nextRun}}</span>
+                  </div>
+                `;
+              }});
+              jobsList += '</div>';
+            }}
+
+            // แสดงเตือนถ้ามี jobs มากกว่า 1 (ทำงานซ้ำ)
+            const warningBadge = jobCount > 1 ? `<span style="background: #fef2f2; color: #b91c1c; padding: 0.2rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-left: 0.5rem;">⚠️ DUPLICATE!</span>` : '';
 
             html += `
               <div style="background: rgba(16, 185, 129, 0.1); padding: 0.6rem; border-radius: 8px; border-left: 3px solid #10b981;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                  <div>
-                    <strong style="color: #10b981;">🤖 Trading Bot Scheduler</strong>
+                  <div style="flex: 1;">
+                    <strong style="color: #10b981;">🤖 Trading Bot Scheduler</strong> ${{warningBadge}}
                     <div style="font-size: 0.85rem; color: #64748b; margin-top: 0.2rem;">
-                      Pairs: ${{pairs.join(", ")}} | Interval: ${{interval}}m | Jobs: ${{activeJobs}} active
+                      Pairs: ${{pairs.join(", ")}} | Interval: ${{interval}}m | <strong style="color: ${{jobCount > 1 ? '#b91c1c' : '#10b981'}};">Jobs: ${{jobCount}} active</strong>
                     </div>
+                    ${{jobsList}}
                   </div>
                   <button
                     class="btn-secondary"
