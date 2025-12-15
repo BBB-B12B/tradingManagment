@@ -24,6 +24,22 @@ echo "WORKER_URL:    $WORKER_URL"
 echo "UVICORN_PORT:  $UVICORN_PORT"
 echo "WRANGLER_DEV_FLAGS: $WRANGLER_DEV_FLAGS"
 
+# === CHECK IF SCRIPT IS ALREADY RUNNING ===
+LOCKFILE="/tmp/dev-all.lock"
+if [[ -f "$LOCKFILE" ]]; then
+  OLD_PID=$(cat "$LOCKFILE")
+  if kill -0 "$OLD_PID" 2>/dev/null; then
+    echo "⚠️  dev-all.sh is already running (PID: $OLD_PID)"
+    echo "If you want to restart, please kill it first with: kill $OLD_PID"
+    echo "Or force cleanup with: rm $LOCKFILE && ./scripts/dev-all.sh"
+    exit 1
+  else
+    echo "Removing stale lock file..."
+    rm -f "$LOCKFILE"
+  fi
+fi
+echo $$ > "$LOCKFILE"
+
 # === CLEANUP OLD PROCESSES FIRST ===
 echo "Cleaning up old processes..."
 # Kill old Wrangler processes
@@ -34,6 +50,10 @@ pkill -f "esbuild --service" 2>/dev/null || true
 pkill -f "workerd serve" 2>/dev/null || true
 # Kill old uvicorn processes on port 5001
 lsof -ti:5001 | xargs kill -9 2>/dev/null || true
+# Kill processes on Worker port 8787
+lsof -ti:${WORKER_PORT} | xargs kill -9 2>/dev/null || true
+# Kill any stray python uvicorn processes
+pkill -f "uvicorn src.app:app" 2>/dev/null || true
 # Wait for cleanup
 sleep 2
 echo "Old processes cleaned up."
@@ -49,6 +69,8 @@ cleanup() {
   pkill -f "wrangler dev" 2>/dev/null || true
   pkill -f "esbuild --service" 2>/dev/null || true
   pkill -f "workerd serve" 2>/dev/null || true
+  # Remove lock file
+  rm -f "$LOCKFILE"
   echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM

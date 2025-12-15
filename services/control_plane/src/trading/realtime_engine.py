@@ -513,6 +513,53 @@ class RealtimeTradingEngine:
             enable_leading_signal=self.config.enable_leading_signal,
         )
 
+        # สร้าง rules_detail จาก rules_result ถ้ามี
+        rules_detail_dict = None
+        if hasattr(rules_result, 'details') and rules_result.details:
+            rules_detail_dict = rules_result.details
+        elif hasattr(rules_result, 'summary') and isinstance(rules_result.summary, dict):
+            # เตรียมข้อมูล CDC colors จาก candles_ltf
+            prev2_color = candles_ltf[-3].cdc_color.value if len(candles_ltf) >= 3 else "unknown"
+            prev1_color = candles_ltf[-2].cdc_color.value if len(candles_ltf) >= 2 else "unknown"
+            curr_color = candles_ltf[-1].cdc_color.value if len(candles_ltf) >= 1 else "unknown"
+
+            # เตรียมข้อมูล Pattern (W-shape) จาก rules_result.rule_4_pattern
+            pattern_result = rules_result.rule_4_pattern
+            pattern_meta = pattern_result.metadata if pattern_result else {}
+            pattern_type = pattern_meta.get("pattern")
+            pattern_details = pattern_meta.get("details", {})
+
+            is_w_shape = pattern_type == "W_SHAPE" if pattern_type else False
+            is_v_shape = pattern_type == "V_SHAPE" if pattern_type else False
+            w_left = pattern_details.get("low1")
+            w_mid = pattern_details.get("mid_high")
+            w_right = pattern_details.get("low2")
+
+            # สร้าง rules_detail พร้อม metadata
+            summary = rules_result.summary
+            rules_detail_dict = {
+                "rule_1_cdc_green": {
+                    "passed": summary.get("rule_1_cdc_green", False),
+                    "reason": f"CDC colors: {prev2_color} → {prev1_color} → {curr_color}",
+                    "metadata": {
+                        "prev2": prev2_color,
+                        "prev1": prev1_color,
+                        "current": curr_color
+                    }
+                },
+                "rule_2_pattern": {
+                    "passed": summary.get("rule_2_pattern", False),
+                    "reason": f"W-shape: {is_w_shape}, V-shape: {is_v_shape}",
+                    "metadata": {
+                        "is_w_shape": is_w_shape,
+                        "is_v_shape": is_v_shape,
+                        "w_left": round(w_left, 2) if w_left else None,
+                        "w_mid": round(w_mid, 2) if w_mid else None,
+                        "w_right": round(w_right, 2) if w_right else None
+                    }
+                }
+            }
+
         # PRIORITY 1: Divergence Entry (backtest.py line 407-425)
         if current_state and current_state.get("special_signal") == "BUY":
             entry_price = current_candle.close
@@ -525,6 +572,7 @@ class RealtimeTradingEngine:
                     "action": "wait",
                     "reason": f"Divergence entry invalid: cutloss={position_cutloss}, entry={entry_price}",
                     "rules": rules_result.summary,
+                    "rules_detail": rules_detail_dict,
                 }
 
             # คำนวณ Position Size
@@ -580,6 +628,7 @@ class RealtimeTradingEngine:
                 "action": "wait",
                 "reason": f"Entry pattern not met: prev2={prev2_zone.value}, prev={prev_zone.value}, bull={is_bull}, v_shape={is_v_shape}",
                 "rules": rules_result.summary,
+                "rules_detail": rules_detail_dict,
             }
 
         # ✅ Pattern Entry Matched!

@@ -302,6 +302,73 @@ def render_bot_runner(pairs: List[str]) -> str:
 
       function formatMetadataValue(key, value, ruleName) {{
         // แปลค่า metadata เป็นภาษาไทยที่อ่านง่าย
+
+        // Special handling for rule_2_pattern metadata (w_left, w_mid, w_right)
+        if (ruleName === "📐 Pattern (W-shape)" && typeof value === "object" && value !== null &&
+            value.w_left != null && value.w_mid != null && value.w_right != null) {{
+          const wLeft = value.w_left || 0;
+          const wMid = value.w_mid || 0;
+          const wRight = value.w_right || 0;
+
+          // คำนวณความสูงของ W-shape
+          const leftHeight = wMid - wLeft;
+          const rightHeight = wMid - wRight;
+          const avgHeight = (leftHeight + rightHeight) / 2;
+          const heightPct = (avgHeight / wLeft) * 100;
+
+          // สร้างกราฟ ASCII Art
+          const line1 = `          <span style="color: #f59e0b;">${{wMid.toFixed(0)}}</span>`;
+          const line2 = `       /             ${{String.fromCharCode(92)}}`;
+          const line3 = `     /                 ${{String.fromCharCode(92)}}`;
+          const line4 = `   /                     ${{String.fromCharCode(92)}}`;
+          const line5 = `<span style="color: #22c55e;">${{wLeft.toFixed(0)}}</span>                         <span style="color: #22c55e;">${{wRight.toFixed(0)}}</span>`;
+
+          const graph = `
+<pre style="font-family: 'IBM Plex Mono', Menlo, monospace; line-height: 1.4; color: #cbd5e1; margin: 0.5rem 0; font-size: 0.85rem;">${{line1}}
+${{line2}}
+${{line3}}
+${{line4}}
+${{line5}}</pre>
+          `.trim();
+
+          const details = `
+<div style="margin-top: 0.3rem; font-size: 0.85rem;">
+  • <strong>จุดต่ำซ้าย:</strong> ${{wLeft.toFixed(2)}}
+  • <strong>จุดกลาง:</strong> ${{wMid.toFixed(2)}}
+  • <strong>จุดต่ำขวา:</strong> ${{wRight.toFixed(2)}}
+  • <strong>ความสูง W:</strong> <span style="color: #f59e0b;">${{heightPct.toFixed(1)}}%</span>
+  • <strong>W-shape:</strong> ${{value.is_w_shape ? '✅ ใช่' : '❌ ไม่ใช่'}}
+  • <strong>V-shape:</strong> ${{value.is_v_shape ? '✅ ใช่' : '❌ ไม่ใช่'}}
+</div>
+          `.trim();
+
+          return graph + details;
+        }}
+
+        // Special handling for CDC transition metadata (prev2, prev1, current)
+        if (ruleName === "🔵→🟢 CDC Transition" && typeof value === "object" && value.prev2 !== undefined) {{
+          const colorMap = {{
+            "red": "🔴 แดง",
+            "orange": "🟠 ส้ม",
+            "blue": "🔵 น้ำเงิน",
+            "lblue": "🔵 น้ำเงินอ่อน",
+            "green": "🟢 เขียว"
+          }};
+
+          const prev2 = colorMap[value.prev2] || value.prev2;
+          const prev1 = colorMap[value.prev1] || value.prev1;
+          const current = colorMap[value.current] || value.current;
+
+          return `
+<div style="margin-top: 0.3rem; font-size: 0.85rem;">
+  • <strong>-2 แท่ง:</strong> ${{prev2}}
+  • <strong>-1 แท่ง:</strong> ${{prev1}}
+  • <strong>ปัจจุบัน:</strong> ${{current}}
+  • <strong>Transition:</strong> ${{prev2}} → ${{prev1}} → ${{current}}
+</div>
+          `.trim();
+        }}
+
         if (typeof value === "object" && value !== null) {{
           // W-Shape details - แสดงเป็นกราฟ ASCII Art
           // ตรวจสอบ 2 กรณี: (1) key === "details" หรือ (2) มี field low1, mid_high, low2
@@ -432,7 +499,47 @@ ${{line5}}</pre>
 
         // Format metadata สำหรับแสดงรายละเอียด
         let detailHTML = `<div><strong>📌 เหตุผล:</strong> ${{reasonThai}}</div>`;
-        if (Object.keys(metadata).length > 0) {{
+
+        // Special handling for W-shape pattern - show ASCII art graph
+        if (ruleName === "📐 Pattern (W-shape)" && metadata.w_left != null && metadata.w_mid != null && metadata.w_right != null) {{
+          const wLeft = metadata.w_left;
+          const wMid = metadata.w_mid;
+          const wRight = metadata.w_right;
+
+          // สร้างกราฟ ASCII Art
+          const line1 = `    <span style="color: #f59e0b;">${{wMid.toFixed(0)}}</span>`;
+          const line2 = `  /        ${{String.fromCharCode(92)}}`;
+          const line3 = ` /          ${{String.fromCharCode(92)}}`;
+          const line4 = `/            <span style="color: #22c55e;">${{wRight.toFixed(0)}}</span>`;
+          const line5 = `<span style="color: #22c55e;">${{wLeft.toFixed(0)}}</span>`;
+
+          const graph = `
+<pre style="font-family: 'IBM Plex Mono', Menlo, monospace; line-height: 1.4; color: #cbd5e1; margin: 0.5rem 0; font-size: 0.85rem;">${{line1}}
+${{line2}}
+${{line3}}
+${{line4}}
+${{line5}}</pre>
+          `.trim();
+
+          const leftHeight = wMid - wLeft;
+          const rightHeight = wMid - wRight;
+          const avgHeight = (leftHeight + rightHeight) / 2;
+          const heightPct = (avgHeight / wLeft) * 100;
+
+          const details = `
+<div style="margin-top: 0.3rem; font-size: 0.85rem;">
+  • <strong>จุดต่ำซ้าย:</strong> ${{wLeft.toFixed(2)}}
+  • <strong>จุดกลาง:</strong> ${{wMid.toFixed(2)}}
+  • <strong>จุดต่ำขวา:</strong> ${{wRight.toFixed(2)}}
+  • <strong>ความสูง W:</strong> <span style="color: #f59e0b;">${{heightPct.toFixed(1)}}%</span>
+  • <strong>W-shape:</strong> ${{metadata.is_w_shape ? '✅ ใช่' : '❌ ไม่ใช่'}}
+  • <strong>V-shape:</strong> ${{metadata.is_v_shape ? '✅ ใช่' : '❌ ไม่ใช่'}}
+</div>
+          `.trim();
+
+          detailHTML += `<div style="margin-top:0.5rem;"><strong>📊 กราฟ W-Shape:</strong></div>`;
+          detailHTML += graph + details;
+        }} else if (Object.keys(metadata).length > 0) {{
           detailHTML += `<div style="margin-top:0.5rem;"><strong>📊 รายละเอียด:</strong></div>`;
           for (const [key, value] of Object.entries(metadata)) {{
             const formattedValue = formatMetadataValue(key, value, ruleName);
@@ -619,10 +726,17 @@ ${{line5}}</pre>
           modeText = "ถือ LONG";
         }}
 
-        if (rulesDetail) {{
+        if (rulesDetail && typeof rulesDetail === 'object') {{
           let html = `<div style="font-weight:700;">${{modeIcon}} ${{pair}} ${{modeText}}</div>`;
-          html += createExpandableRuleItem("🔵→🟢 CDC Transition", rulesDetail.rule_1_cdc_green, "🔵");
-          html += createExpandableRuleItem("ℹ️ 📐 Pattern (Info)", rulesDetail.rule_4_pattern, "📐");
+
+          // Add expandable items only if they exist
+          if (rulesDetail.rule_1_cdc_green) {{
+            html += createExpandableRuleItem("🔵→🟢 CDC Transition", rulesDetail.rule_1_cdc_green, "🔵");
+          }}
+          if (rulesDetail.rule_2_pattern) {{
+            html += createExpandableRuleItem("📐 Pattern (W-shape)", rulesDetail.rule_2_pattern, "📐");
+          }}
+
           appendRuleLogHTML(html);
         }} else {{
           const ruleText = formatRuleFlags(rules);

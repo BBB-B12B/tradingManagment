@@ -3,6 +3,10 @@
 
 echo "🛑 Force killing all dev processes..."
 
+# Remove lock file
+echo "  Removing lock file..."
+rm -f /tmp/dev-all.lock
+
 # Kill Wrangler processes
 echo "  Killing wrangler dev..."
 pkill -f "wrangler dev" 2>/dev/null || true
